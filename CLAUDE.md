@@ -9,9 +9,10 @@ middleware layer is implemented by hand: byte-level marshalling, timeouts and
 retransmission, duplicate filtering, reply histories, and server-to-client
 callbacks. No RPC framework is used, because writing that layer is the exercise.
 
-Spec: `docs/Course Project.pdf`. Lecture decks are one directory up in `../`;
-deck 2 (Interprocess Communication) and deck 3 (Distributed Objects & Remote
-Invocation) are the material this project implements.
+- Brief: `docs/Course Project.pdf`
+- Full specification and design rationale: `README.md`
+- Lecture decks: one directory up in `../`; decks 2 (Interprocess Communication)
+  and 3 (Distributed Objects & Remote Invocation) are what this project implements
 
 Code deadline **2026-10-14**. Live demo **2026-10-17**.
 
@@ -23,13 +24,13 @@ accident, and it should not be "simplified" away.
 
 Concretely:
 
-- **The client and server are written in different languages** (C server, Java
-  client). The brief calls this "an additional but optional requirement". Both ends
-  in one language would be markedly easier and is the baseline the brief expects.
+- **The client and server are written in different languages** (working assumption:
+  C++17 server, Java client). The brief calls this "an additional but optional
+  requirement". Both ends in one language is the baseline the brief expects.
 - **The two extra operations are a matched idempotent/non-idempotent pair over the
   same mutable state**, rather than the easier route of pairing a write against a
-  read-only query. This requires per-client seat-ownership tracking that the brief
-  does not demand.
+  read-only query. This requires per-client seat-ownership tracking the brief does
+  not demand.
 - **Seat ownership is tracked per client**, so `CANCEL_SEATS` and `SET_RESERVATION`
   operate on "my booking" rather than on the global pool.
 
@@ -37,7 +38,7 @@ If a change would make one of these easier by abandoning the harder option, that
 a regression. Raise it rather than doing it.
 
 The counterweight: none of this may put the baseline at risk. Delivery is phased so
-a working system exists before the hard parts land. See "Delivery phases" below.
+a working system exists before the hard parts land — see "Delivery phases".
 
 ## Hard constraints
 
@@ -57,9 +58,9 @@ adding a dependency or an import.
 
 ## Architecture at a glance
 
-Full rationale for every decision below lives in `README.md`. That document is the
-one to update when a design decision changes, and it records rejected alternatives
-so choices can be defended under questioning.
+`README.md` is the authoritative specification and carries the rationale for every
+decision, including rejected alternatives. Update it when a design decision changes;
+this file is the short form.
 
 ```
   application    flight services, console UI
@@ -70,56 +71,70 @@ so choices can be defended under questioning.
   UDP            sockets
 ```
 
-Header on every datagram, big-endian, 4-byte aligned:
+**Every field in every message is exactly 4 bytes, big-endian.** No `uint8`, no
+`uint16`, anywhere, including the header. Java has no unsigned types, so uniform
+width is what keeps two independent implementations honest. This rule is
+load-bearing — see `README.md` D23.
+
+Fixed 36-byte header:
 
 ```
-int32 messageType    0 = request, 1 = reply, 2 = callback
-int32 requestId      monotonic per client process
-int32 opCode
-int32 status         reply only; 0 = OK, non-zero = error code
+ 0  uint32  magic        0x53433631 ("SC61")
+ 4  int32   version      1
+ 8  int32   messageType  0=REQUEST 1=REPLY 2=CALLBACK 3=MONITOR_END
+12  int32   opCode
+16  int32   semantics    0=at-least-once 1=at-most-once
+20  uint32  clientId     random nonzero, fixed for the client's lifetime
+24  int32   requestId    monotonic per client
+28  int32   ackUpTo      requests only; history-pruning watermark
+32  int32   status       replies and callbacks only
 ```
 
-A request is identified by **(client IP, client port, requestId)**, not `requestId`
-alone. That triple keys the reply history.
+A request is identified by **(clientId, requestId)** — not by network address. That
+pair keys both the reply history and the booking ledger. The observed source
+endpoint is used only to address callbacks.
 
 | # | Operation | Idempotent |
 |---|---|---|
 | 1 | `QUERY_BY_ROUTE(source, dest)` | yes |
 | 2 | `QUERY_BY_ID(flightId)` | yes |
 | 3 | `RESERVE(flightId, n)` | no |
-| 4 | `MONITOR(flightId, intervalMs)` | — |
+| 4 | `MONITOR(flightId, intervalMs)` | registration only |
 | 5 | `CANCEL_SEATS(flightId, n)` | no (required non-idempotent extra) |
 | 6 | `SET_RESERVATION(flightId, target)` | yes (required idempotent extra) |
 
-Invocation semantics (`at-least-once` / `at-most-once`) are selected by CLI flag at
-startup. The server is single-threaded on the request path.
+Invocation semantics are selected by CLI flag and carried in the header. The server
+is single-threaded on the request path.
 
 ## Delivery phases
 
 The bonus must not endanger the baseline, so build in this order and keep every
 phase working:
 
-1. **Wire format spec** written down first, as the contract between the two
-   implementations.
-2. **Java client + Java server.** This is the baseline deliverable and the fallback
-   demo.
-3. **C server**, ported against the spec. The Java server is retained as a test
-   oracle — point the Java client at both and diff responses byte for byte.
+1. **`README.md` Part I frozen** — it is the contract between two implementations
+   that share no code.
+2. **Java client + Java server.** The baseline deliverable and the fallback demo.
+3. **Conformance vector** (`README.md` §11.2) in both languages, byte-identical.
+4. **C++ server**, written against Part I. The Java server is retained as a test
+   oracle — point the Java client at both and diff responses.
 
-Do not start phase 3 before phase 2 demos cleanly end to end on two machines.
+Do not start phase 4 before phase 2 demos cleanly end to end on two machines.
 
 ## Working on this repo
 
-- Match the existing byte-offset conventions in the marshalling code exactly. An
-  off-by-one in the packer is invisible until it corrupts a float on the wire.
-- **Never `memcpy` a C struct onto the wire.** Padding differs by platform and Java
+- Match the existing byte-offset conventions exactly. An off-by-one in the packer is
+  invisible until it corrupts a float on the wire.
+- **Never `memcpy` a struct onto the wire.** Padding differs by platform and Java
   has no equivalent. Serialize field by field.
+- **Never type-pun a float through a cast** — `memcpy` into a `uint32_t`, then
+  `htonl`. The cast is undefined behaviour in C++.
 - In Java, mask every byte read with `& 0xFF`, and validate decoded lengths are
-  non-negative before allocating.
-- Adding an operation touches: the opcode table above, the wire spec in `README.md`,
-  the marshaller on both sides, the server dispatcher, and the client menu.
+  non-negative and in range before allocating.
+- Check remaining buffer length before every cursor read, on both sides.
+- Adding an operation touches: the opcode table above, `README.md` §4, the
+  marshaller on both sides, the server dispatcher, and the client menu.
 - Comments are graded. Non-obvious protocol decisions get a comment explaining the
-  *why*, with a lecture-slide reference where one applies.
+  *why*, with a lecture-slide or decision-record reference.
 - Do not reach for a library to solve a problem the brief wants solved by hand. If
   something feels like it needs a serialization framework, that is the exercise.
 
@@ -135,8 +150,17 @@ Do not start phase 3 before phase 2 demos cleanly end to end on two machines.
   machines, since the callback demo needs one client reserving while another
   monitors.
 
-## Open items
+## Open decisions
 
-- Group membership and work split.
-- Operating system of the server machine, which determines whether the C server
-  targets Winsock or BSD sockets. This changes the C from the first line.
+Three forks need group agreement before phase 2. Full argument in `README.md` §22.
+
+1. **Language pairing** — C++17 server + Java client (assumed), versus C++ both ends
+   (forfeits the credit), versus C server + Java client (discards existing work).
+   Blocks phases 2 and 4.
+2. **Which two extra operations** — `CANCEL_SEATS`/`SET_RESERVATION` on seats
+   (assumed; corruption visible live to a monitoring client) versus
+   `ADJUST_FARE`/`SET_FARE` on airfare (less work, weaker demo). Blocks phase 2.
+3. **Server operating system** — decides Winsock versus BSD sockets, and changes the
+   server from its first line. Blocks phase 4.
+
+Group membership and the work split are also still open.
