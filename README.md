@@ -38,12 +38,12 @@ for the optional credit. Those are marked **[HARD PATH]**.
 7. [Client behaviour](#7-client-behaviour)
 8. [Invocation semantics](#8-invocation-semantics)
 9. [Callback subsystem](#9-callback-subsystem)
-10. [Fault injection](#10-fault-injection)
+10. [Fault injection and observability](#10-fault-injection-and-observability)
 11. [Cross-language contract](#11-cross-language-contract)
 
 **Part II — Design rationale**
 
-12. [Decision records D1–D23](#12-decision-records)
+12. [Decision records D1–D25](#12-decision-records)
 
 **Part III — Delivery**
 
@@ -51,13 +51,15 @@ for the optional credit. Those are marked **[HARD PATH]**.
 14. [Test plan](#14-test-plan)
 15. [Build and run](#15-build-and-run)
 16. [Repository layout](#16-repository-layout)
-17. [Delivery phases](#17-delivery-phases)
+17. [Delivery milestones](#17-delivery-milestones)
 18. [Demo script](#18-demo-script)
 19. [Requirement traceability](#19-requirement-traceability)
 20. [Risk register](#20-risk-register)
 21. [Assumptions and boundaries](#21-assumptions-and-boundaries)
 22. [Open decisions](#22-open-decisions)
-23. [Administration](#23-administration)
+23. [Settled from the brief](#23-settled-from-the-brief)
+24. [Team workflow and ownership](#24-team-workflow-and-ownership)
+25. [Administration](#25-administration)
 
 ---
 ---
@@ -210,7 +212,7 @@ There are **no type tags on the wire**. Both ends derive the layout from `opCode
 
 ### 3.4 Header  → D4, D19
 
-Every datagram begins with a fixed **36-byte** header.
+Every datagram begins with a fixed **40-byte** header.
 
 | Offset | Type | Field | Meaning |
 |---|---|---|---|
@@ -223,29 +225,54 @@ Every datagram begins with a fixed **36-byte** header.
 | 24 | `int32` | `requestId` | monotonic per client; echoed in the reply |
 | 28 | `int32` | `ackUpTo` | requests only; highest `requestId` this client has a reply for, or −1 |
 | 32 | `int32` | `status` | replies and callbacks only; 0 in requests |
+| 36 | `int32` | `payloadLen` | exact body length in bytes, 0 to `MAX_BODY` |
 
-The body begins at offset 36.
+The body begins at offset 40.
 
 `magic` rejects unrelated traffic arriving on the port. `version` catches the two
-implementations drifting apart. `semantics` lets the server detect a client running
-in the opposite mode and warn, rather than silently producing meaningless
-experimental results.
+implementations drifting apart. `semantics` lets the server reject a client running
+in the opposite mode outright, rather than serving it and producing experimental
+results that look valid and mean nothing. `payloadLen` is redundant with the datagram length on a
+well-formed message, which is the point: `received == HEADER_SIZE + payloadLen` is a
+one-line truncation and disagreement check that runs before anything is decoded.
 
 ### 3.5 Size limits
 
 | Constant | Value | Derivation |
 |---|---|---|
 | `MAX_DATAGRAM` | 512 bytes | fragmentation-free on any realistic path |
-| `HEADER_SIZE` | 36 bytes | §3.4 |
-| `MAX_BODY` | 476 bytes | derived |
+| `HEADER_SIZE` | 40 bytes | §3.4 |
+| `MAX_BODY` | 472 bytes | derived |
 | `MAX_STRING_BYTES` | 63 | place names; bounds the receive buffer |
 | `MAX_ROUTE_RESULTS` | 64 | 4 + 4 + 64×4 = 264 bytes, inside `MAX_BODY` |
+
+### 3.6 Decoder validation order
+
+Both implementations validate in exactly this order. The order is normative, not
+stylistic: each step establishes what the next step is allowed to trust.
+
+1. Received length is at least `HEADER_SIZE`.
+2. Read the fixed header fields. **Do not trust `payloadLen` yet.**
+3. Verify `magic`. A mismatch is logged and dropped with no reply — the datagram may
+   not be from a client of this system at all.
+4. Verify `version`, a known `messageType`, and `received == HEADER_SIZE + payloadLen`.
+5. Verify `opCode` is in range, then decode that operation's body with a bounds check
+   before every cursor advance.
+6. Validate field values: dates form a real calendar date, strings are within
+   `MAX_STRING_BYTES`, counts fit the remaining body, seat counts and intervals are in
+   range, floats are finite.
+7. If the header carried a trustworthy `clientId` and `requestId`, reply with a status
+   code. Otherwise log and drop.
+
+Step 6's float check matters even though no current operation accepts a float
+argument (§4). It is a standing rule so that adding one cannot introduce a NaN or
+infinity into the flight table by omission.
 
 ---
 
 ## 4. Operation catalogue
 
-All bodies are shown as they appear after the 36-byte header. Argument validation
+All bodies are shown as they appear after the 40-byte header. Argument validation
 failures return `ERR_INVALID_ARGUMENT` throughout.
 
 ### Op 1 — `QUERY_BY_ROUTE` · idempotent
@@ -258,9 +285,13 @@ failures return `ERR_INVALID_ARGUMENT` throughout.
 | | `uint32` | `count` |
 | | `int32 × count` | `flightIds` |
 
-Matching is case-normalised exact text. Returns `ERR_NO_ROUTE_MATCH` when nothing
-matches — the brief requires an error, not an empty list. Results are capped at
-`MAX_ROUTE_RESULTS` with `truncated = 1`. → D14
+Matching trims outer ASCII whitespace, applies ASCII case folding, then compares
+exactly. Returns `ERR_NO_ROUTE_MATCH` when nothing matches — the brief requires an
+error, not an empty list. Results are capped at `MAX_ROUTE_RESULTS` with
+`truncated = 1`. → D14
+
+**`flightIds` are returned in ascending order.** The repository's iteration order is
+not an interface, and a test that asserts on results must not depend on it.
 
 ---
 
@@ -409,6 +440,8 @@ than only detecting gaps between the ones that arrived.
 | 8 | `ERR_MONITOR_TABLE_FULL` | registry at capacity |
 | 9 | `ERR_SERVER_ERROR` | internal invariant violation |
 | 10 | `ERR_VERSION_MISMATCH` | header `version` not recognised |
+| 11 | `ERR_SEMANTICS_MISMATCH` | client and server are in different invocation modes |
+| 12 | `ERR_REQUEST_ID_CONFLICT` | history holds these IDs with a different request fingerprint |
 
 Error replies carry a header and **no body**. Human-readable text is generated
 client-side from the code. → D4
@@ -425,37 +458,50 @@ carries a usable `clientId` and `requestId` receives an error reply.
 
 ```
 loop forever:
-    n, from = recvfrom(socket)
+    # The wait is BOUNDED. See "timer independence" below.
+    wait = min(monitors.time_until_next_expiry(), MAX_POLL_MS)
 
+    if socket_readable_within(wait):
+        n, from = recvfrom(socket)
+        process_one_datagram(n, from, buf)
+
+    expire_monitors_and_send_monitor_end(now)    # §9.3
+    evict_expired_history(now)                   # §8.3
+
+
+process_one_datagram(n, from, buf):
     if simulate_drop(dropRequestRate):
-        log "DROPPED REQUEST from {from}"; continue
+        log "DROP request from={from} reason=injected"; return
 
-    if n < HEADER_SIZE: continue
-    hdr = parse_header(buf)
-    if hdr.magic != MAGIC: log "alien datagram from {from}"; continue
-    if hdr.version != VERSION: reply(ERR_VERSION_MISMATCH); continue
-    if hdr.messageType != REQUEST: continue
-    if hdr.semantics != serverSemantics: warn "semantics mismatch"
+    if n < HEADER_SIZE: return
+    hdr = parse_header(buf)                      # validation order: §3.6
+    if hdr.magic != MAGIC: log "DROP alien datagram from={from}"; return
+    if hdr.version != VERSION: send_error(ERR_VERSION_MISMATCH, hdr, from); return
+    if hdr.messageType != REQUEST: return
+    if n != HEADER_SIZE + hdr.payloadLen: send_error(ERR_MALFORMED_REQUEST,...); return
+    if hdr.semantics != serverSemantics: send_error(ERR_SEMANTICS_MISMATCH,...); return
 
-    log "RECV {from} client={hdr.clientId} req={hdr.requestId} op={hdr.opCode}"
-
+    log "RECV client={hdr.clientId} req={hdr.requestId} op={hdr.opCode}"
     prune_history(hdr.clientId, hdr.ackUpTo)     # §8.3
-    sweep_expired_monitors(now)                  # §9.3
 
-    if semantics == AT_MOST_ONCE:
-        e = history_lookup(hdr.clientId, hdr.requestId)
+    if serverSemantics == AT_MOST_ONCE:
+        fp = fingerprint(hdr.opCode, buf + HEADER_SIZE, hdr.payloadLen)   # §8.2
+        e  = history_lookup(hdr.clientId, hdr.requestId)
         if e != NULL:
-            log "DUPLICATE req={hdr.requestId} -> replaying stored reply"
+            if e.fingerprint != fp:
+                log "CONFLICT req={hdr.requestId} fingerprint differs"
+                send_error(ERR_REQUEST_ID_CONFLICT, hdr, from); return
+            log "CACHE_HIT req={hdr.requestId} replaying stored reply"
             maybe_send(e.bytes, from)
-            continue                             # no re-execution, no callbacks
+            return                               # no re-execution, no callbacks
 
     status, body = dispatch(hdr.opCode, buf + HEADER_SIZE, hdr.clientId, from)
     reply = marshal_reply(hdr, status, body)
 
-    if semantics == AT_MOST_ONCE:
-        history_store(hdr.clientId, hdr.requestId, reply)   # store before sending
+    if serverSemantics == AT_MOST_ONCE:
+        history_store(hdr.clientId, hdr.requestId, fp, reply)   # store BEFORE sending
 
-    log "SEND {from} req={hdr.requestId} status={status}"
+    log "SEND req={hdr.requestId} status={status}"
     maybe_send(reply, from)
 
     if status == OK and opCode in {RESERVE, CANCEL_SEATS, SET_RESERVATION}:
@@ -464,19 +510,27 @@ loop forever:
     assert_seat_invariant()                      # §2.4
 ```
 
-Four properties of that loop are load-bearing and belong in the report:
+Five properties are load-bearing and belong in the report:
 
-1. **The duplicate path returns before dispatch.** Under at-most-once a duplicate
+1. **Timer independence.** The socket wait is bounded by the nearest monitor expiry,
+   never an unbounded block. Monitor expiry, `MONITOR_END` delivery and history
+   eviction must not depend on a future request happening to arrive — on an idle
+   server a blocking `recvfrom` would leave registrations alive past their interval,
+   which is a correctness failure, not a tidiness one.
+2. **The duplicate path returns before dispatch.** Under at-most-once a duplicate
    neither re-executes nor re-fires callbacks; under at-least-once there is no
    duplicate path, so both happen. That single branch is the entire behavioural
    difference between the two semantics.
-2. **The reply is stored in the history before the send is attempted**, so a reply
+3. **The reply is stored in the history before the send is attempted**, so a reply
    lost in transit is still available to answer the retransmission.
-3. **Callbacks fire even when the reply is dropped.** A dropped reply models loss on
+4. **Callbacks fire even when the reply is dropped.** A dropped reply models loss on
    the return path — the server did execute. This is what makes at-least-once
    corruption visible to a monitoring client.
-4. **The invariant is asserted every iteration**, so corruption is detected when it
+5. **The invariant is asserted every iteration**, so corruption is detected when it
    occurs rather than inferred later.
+
+All expiry decisions use a **monotonic clock**. No protocol behaviour may depend on
+wall-clock time, which can jump.
 
 ### 6.2 Concurrency  → D11
 
@@ -574,9 +628,26 @@ No history. Every request that arrives is executed. Correct for operations 1, 2 
 Keyed on **(clientId, requestId)** — not on network address, so a retransmission
 stays recognisable across a NAT rebinding or a client restart. → D5
 
+Each history entry also stores a **request fingerprint**: a stable hash of `opCode`
+plus the exact request body. On a key hit the server compares fingerprints. A match
+replays the cached reply; a mismatch returns `ERR_REQUEST_ID_CONFLICT` and executes
+nothing. Without this, a client that reuses a `requestId` for different arguments —
+through a bug, a counter reset, or wraparound — is silently answered with the reply
+to a different question, which is a worse failure than either semantics is supposed
+to permit. → D24
+
+The fingerprint is computed and compared **entirely within the server**. It never
+appears on the wire, so the two implementations need not agree on the hash function
+and any stable one will do.
+
 The **marshalled reply bytes** are stored, not the structured result, so a duplicate
 is answered by a buffer copy that is byte-identical to the original without
 depending on marshaller determinism. → D8
+
+**Error replies are cached too.** An application-level error is a legitimate reply,
+and re-executing to regenerate it would re-run validation against state that may
+have changed since. Only datagrams too malformed to yield a trustworthy `clientId`
+and `requestId` go uncached — there is nothing to key them on.
 
 ### 8.3 Bounding the history  → D8
 
@@ -635,7 +706,7 @@ deadline remains authoritative.
 
 ---
 
-## 10. Fault injection
+## 10. Fault injection and observability
 
 Loss is simulated in the application, not by an external tool. → D12
 
@@ -664,6 +735,50 @@ Deck 2's three scenarios map as:
 | request message lost | `--drop-request` on the server |
 | reply message lost | `--drop-reply` on the server |
 | incomplete interaction | `--drop-reply` on the server with a short client `--timeout` |
+
+### 10.1 Deterministic controls  → D25
+
+Probabilistic loss is what §13 measures over many trials, but it is the wrong tool
+for a live demonstration: at *p* = 0.5 the drop that makes the point may simply not
+happen while a marker is watching. Alongside the probability flags, both programs
+accept one-shot rules that fire exactly once and then log `RULE_CONSUMED`:
+
+```
+--drop-first-request
+--drop-first-reply <OPCODE>
+--drop-first-callback
+```
+
+Scoping `--drop-first-reply` by opcode matters: a demo reserves, cancels and sets in
+sequence, and the rule must fire on the operation being demonstrated rather than on
+whichever request happens to arrive first.
+
+Active rules and all seeds are printed at startup and recorded with the captured
+logs (§12.3), so a scenario can be replayed exactly.
+
+### 10.2 Log schema
+
+Field order is fixed so logs captured on three machines can be read side by side.
+Human-readable text is fine; stable field positions are not optional.
+
+```
+timestamp  role    event      dir       client  req  opcode  attempt  decision            state
+12:04:18.221 CLIENT SEND      request   51      17   RESERVE 1        transmitted         -
+12:04:18.223 SERVER EXECUTE   request   51      17   RESERVE 1        new                 seats=7
+12:04:18.224 SERVER DROP      reply     51      17   RESERVE 1        forced-first-reply  seats=7
+12:04:18.975 CLIENT RETRY     request   51      17   RESERVE 2        timeout             -
+12:04:18.977 SERVER CACHE_HIT reply     51      17   RESERVE 2        replay              seats=7
+```
+
+Never log a bare `failed` or `duplicate`. Every line carries the client, request ID
+and opcode, or it cannot be correlated against the other two machines' logs.
+
+**Minimum events.** Client: command parsed, request encoded, request dropped or
+sent, wait started, timeout, retry, reply ignored, reply matched, callback received,
+monitor expired, final timeout. Server: datagram received, validation failure,
+semantics mismatch, history miss / hit / conflict, service executed, state before
+and after, reply cached, reply dropped or sent, callback dropped or sent,
+subscription added / updated / expired, history eviction.
 
 ---
 
@@ -737,7 +852,7 @@ was chosen, why, what else was considered, and why it was rejected.
 | D1 | Transport: UDP | mandated |
 | D2 | Server and client in different languages | **[HARD PATH]** |
 | D3 | Wire format: CDR-style, big-endian, aligned | |
-| D4 | Fixed 36-byte header, error codes without text | |
+| D4 | Fixed 40-byte header, error codes without text | |
 | D5 | Request identity: `(clientId, requestId)` | |
 | D6 | Time as five `int32` fields | |
 | D7 | Both invocation semantics, runtime-selected | mandated |
@@ -757,6 +872,8 @@ was chosen, why, what else was considered, and why it was rejected.
 | D21 | No application-level checksum | |
 | D22 | Bookings are never expired | |
 | D23 | Uniform 4-byte field width | |
+| D24 | Request fingerprints in the history | |
+| D25 | Deterministic fault rules alongside probabilistic loss | |
 
 ---
 
@@ -840,19 +957,22 @@ points at `htonl`/`ntohl`.
 
 ---
 
-### D4 — Fixed 36-byte header, error codes without text
+### D4 — Fixed 40-byte header, error codes without text
 
-**Decision.** A fixed header of nine 4-byte fields (§3.4). Error replies carry a
+**Decision.** A fixed header of ten 4-byte fields (§3.4). Error replies carry a
 status code and no body.
 
 **Reasoning.** Deck 2 gives the minimal structure as `messageType` + `requestId` +
 application-specific content. `opCode` is added because one port multiplexes six
 operations and the dispatcher must choose a body parser. `status` lets every error be
 decoded before the body is touched. `ackUpTo` bounds the history (D8) without extra
-traffic. `magic`, `version` and `semantics` are guards, argued in D19. A fixed size
-means constant offsets, the main defence against cross-language layout drift.
+traffic. `magic`, `version` and `semantics` are guards, argued in D19. `payloadLen`
+duplicates information the datagram length already carries, deliberately: comparing
+the two is a single check that catches truncation and any disagreement about how
+long the body should be, before a decoder has trusted anything. A fixed size means
+constant offsets, the main defence against cross-language layout drift.
 
-Error replies stay a fixed 36 bytes with no body, which keeps the duplicate-replay
+Error replies stay a fixed 40 bytes with no body, which keeps the duplicate-replay
 path a trivial fixed-size buffer copy and means the client can word and localise its
 own messages.
 
@@ -1340,7 +1460,7 @@ inspection: if a read is not four bytes, it is wrong. Given that the two impleme
 share no code and no compiler, a rule that can be checked by looking is worth more than
 the bytes it costs.
 
-The cost is real but irrelevant here: the header grows from 20 to 36 bytes and the time
+The cost is real but irrelevant here: the header grows from 20 to 40 bytes and the time
 structure from 6 to 20, inside a 512-byte budget carrying bodies of under 300 bytes.
 
 **Alternatives rejected.**
@@ -1351,6 +1471,65 @@ structure from 6 to 20, inside a 512-byte budget carrying bodies of under 300 by
   Java, and this project has to be right in both.
 - *Narrow types in the header only.* Splits the rule, which is the property that makes it
   useful.
+
+---
+
+### D24 — Request fingerprints in the history
+
+**Decision.** Each at-most-once history entry stores a stable hash of `opCode` plus the
+exact request body. A key hit with a mismatched fingerprint returns
+`ERR_REQUEST_ID_CONFLICT` and executes nothing.
+
+**Reasoning.** `(clientId, requestId)` identifies a request only if the client never
+reuses a pair for different arguments. That assumption holds for a correct client and
+fails for a buggy one, a counter reset, or `requestId` wraparound. Without the
+fingerprint the failure is silent and severe: the server answers a question with the
+reply to a different question, which is neither at-most-once nor at-least-once
+behaviour but simply wrong. The fingerprint converts an invisible corruption into a
+loud, testable error (T10 in §14).
+
+It is cheap because it never leaves the server. The hash is computed and compared
+inside one process, so the two implementations need not agree on it — none of the
+cross-language objections that rule out an on-the-wire checksum (D21) apply.
+
+**Alternatives rejected.**
+
+- *Trusting the client not to reuse IDs.* The whole point of at-most-once is to behave
+  correctly when something has gone wrong; assuming the client is well-behaved
+  contradicts the failure model the mechanism exists to handle.
+- *Storing the full request body instead of a hash.* Exact rather than probabilistic,
+  and rejected as multiplying history memory by the request size to eliminate a
+  collision probability already negligible at this scale.
+- *Silently re-executing on a fingerprint mismatch.* Turns a detectable bug into
+  at-least-once behaviour under a label claiming otherwise.
+
+---
+
+### D25 — Deterministic fault rules alongside probabilistic loss
+
+**Decision.** Both programs support one-shot `--drop-first-*` rules in addition to the
+seeded probabilistic gates. The rules fire once and log `RULE_CONSUMED`.
+
+**Reasoning.** The two mechanisms answer different questions and neither substitutes
+for the other. §13 needs probabilistic loss to report outcome rates across 20 trials.
+A live demonstration needs the opposite: the drop must happen on the specific
+operation being shown, on the first attempt, while someone is watching. At *p* = 0.5
+there is a 50% chance the point is not made.
+
+`--seed` alone is not sufficient. It makes a run reproducible, but only after someone
+has hunted for a seed whose random sequence drops at the right moment — and that seed
+stops working the instant the demo script changes order.
+
+Scoping the reply rule by opcode is necessary because the demo issues several
+operations in sequence and the interesting drop is rarely on the first one.
+
+**Alternatives rejected.**
+
+- *Probabilistic loss only.* The graded demonstration becomes a coin flip.
+- *Deterministic rules only.* Removes the ability to report loss rates over trials,
+  which §13 needs.
+- *Scripting the drops externally.* Reintroduces the external-tool objection of D12,
+  and the brief requires loss simulated in-program.
 
 ---
 ---
@@ -1404,13 +1583,23 @@ server-side duplicate count, callbacks received versus sent, and invariant pass/
 | boundary | `RESERVE` for exactly all remaining seats, and one more |
 | boundary | `CANCEL_SEATS` for exactly the held count, and one more |
 | boundary | `SET_RESERVATION` to 0, to current, and above capacity |
-| negative | truncated datagram, oversized string length, negative length, unknown opcode, bad magic, wrong version |
+| negative | truncated datagram, oversized string length, negative length, unknown opcode, bad magic, wrong version, `payloadLen` disagreeing with the received length |
 | negative | reply arriving with a foreign `clientId` — must be discarded, not matched |
+| negative | NaN and ±infinity rejected wherever a float is decoded |
+| reliability | **T10** reuse `(clientId, requestId)` with a changed opcode or body under at-most-once → `ERR_REQUEST_ID_CONFLICT`, no service execution |
+| reliability | **T13** client and server started in different modes → `ERR_SEMANTICS_MISMATCH`, no state change |
+| reliability | **T15** monitor expiry on a fully idle server → registration removed and `MONITOR_END` sent with no request traffic whatsoever |
+| reliability | **T12** state change, then server restart → initial dataset restored; report states the process-lifetime boundary |
 | integration | full operation set against a single-language server |
 | integration | Java client against the C++ server, all operations, diffed against the single-language server |
-| system | concurrent monitoring: two clients register for one flight, a third reserves; both receive the same new seat count before expiry and none after |
+| system | **T06** concurrent monitoring: two clients register for one flight, a third reserves; both receive the same seat count and `callbackSeq` before expiry, neither after |
 | system | three-machine callback demo |
 | system | all experiments in §13 |
+
+**T15 is the regression test for the timer-independence rule** in §6.1. It must be run
+with the server receiving no datagrams at all for the duration of the interval — a
+version that sweeps expired monitors only on request arrival passes every other test
+here and fails this one.
 
 The single-language server exists as the oracle for the second integration row. Any
 difference between the two servers for the same request is a bug in the cross-language
@@ -1443,11 +1632,14 @@ flight_server  --port <port>
                [--semantics at-least-once|at-most-once]   default at-most-once
                [--drop-request <p>] [--drop-reply <p>]    default 0.0
                [--drop-callback <p>]                      default 0.0
+               [--drop-first-reply <OPCODE>]              one-shot, see §10.1
+               [--drop-first-callback]                    one-shot
                [--seed <n>]                               PRNG seed, repeatable runs
 
 flight_client  --host <server-ip> --port <port>
                [--semantics at-least-once|at-most-once]   must match the server
                [--drop-request <p>] [--drop-reply <p>]    default 0.0
+               [--drop-first-request]                     one-shot
                [--timeout <ms>]                           default 750
                [--retries <n>]                            default 3
                [--seed <n>]
@@ -1460,13 +1652,17 @@ learns each client's address from the received datagram, so clients need no prio
 registration. Find the server's address with `ipconfig` on Windows or `ip addr` on
 Linux.
 
-Both programs print every request and reply they handle. `--seed` fixes the
-drop-simulation PRNG so an experimental run can be reproduced exactly, including in
-front of a marker. A `--semantics` mismatch between client and server is detected from
-the header and warned about (D19) rather than silently tolerated.
+Both programs print every request and reply they handle, in the schema of §10.2. Each
+prints its bound endpoint, the server endpoint, the selected semantics, the loss
+configuration and the seed at startup, so a captured log is self-describing.
+
+A `--semantics` mismatch is rejected with `ERR_SEMANTICS_MISMATCH` rather than
+tolerated (D19). `--seed` fixes the probabilistic gates; the `--drop-first-*` rules
+(§10.1) are what a live demonstration should use.
 
 Host firewalls on all three machines must allow the chosen UDP port inbound, and client
-return traffic.
+return traffic to ephemeral ports. Clients must use the server machine's LAN address,
+not a loopback address.
 
 ---
 
@@ -1493,22 +1689,37 @@ Part I, not against the Java code.
 
 ---
 
-## 17. Delivery phases
+## 17. Delivery milestones
 
 The optional credit must not endanger the baseline, so a demonstrable system exists
-before the difficult part begins.
+before the difficult part begins. **M6 does not start before M4 demos cleanly. If M6
+runs out of time, M5 is a complete and submittable project** — it forfeits the
+optional credit and nothing else.
 
-| Phase | Deliverable | Exit criterion |
-|---|---|---|
-| 1 | Part I frozen | both implementers agree the spec is unambiguous |
-| 2 | Java client + Java server: six operations, both semantics, callbacks | full §13 set passes on two machines |
-| 3 | Conformance vector (§11.2) in both languages | both produce identical bytes |
-| 4 | C++ server | Java client passes §14 integration, diffed against the Java server |
-| 5 | Report, demo rehearsal | three-machine run end to end |
+| | Milestone | Deliverables | Exit criterion |
+|---|---|---|---|
+| M0 | Protocol freeze | Part I agreed; §22 decisions closed; shared constants written | every member can read one request's byte layout aloud; no field ambiguity remains |
+| M1 | Buildable skeleton | build targets, socket bind, receive loop, one stub operation | fresh clone builds on two machines; one datagram round-trips and is logged |
+| M2 | Vertical slice | `QUERY_BY_ID` end to end, one invalid-input path, codec unit tests | `main` demonstrates encode → UDP → decode → dispatch → reply → render |
+| M3 | Core services | all six operations, booking ledger, invariants, functional tests | operations pass their §14 boundary tests at zero loss |
+| M4 | Reliability semantics | retry loop, both semantics, fingerprints, deterministic drop rules | T10, T13 and experiments E1–E7 pass, with logs that visibly distinguish the modes |
+| M5 | Monitoring | `MONITOR`, callbacks, `callbackSeq`, idle expiry, `MONITOR_END` | T06, T11 and T15 pass with two monitoring clients |
+| M6 | Cross-language server | conformance vector (§11.2) in both languages, then the second implementation | both produce identical bytes; the Java client passes §14 integration diffed against the single-language server |
+| M7 | Hardening and multi-host | malformed-input tests, restart disclosure, firewall checks, clean-machine build | full §14 matrix passes or documented exceptions are agreed |
+| M8 | Final package | tagged commit, packed source file, report, demo rehearsal | every document matches the tagged code; rehearsal completes in the allotted time |
 
-Phase 4 does not start before phase 2 demos cleanly. **If phase 4 runs out of time,
-phase 2 is a complete and submittable project** — it simply forfeits the optional
-credit.
+### Definition of done
+
+A feature is not finished because it worked once on one machine. All of the
+following must hold:
+
+- The wire contract in Part I is updated in the **same** change, if the feature
+  touched it.
+- It builds from a clean checkout and passes its unit and integration tests.
+- Success, invalid input, loss or timeout, and duplicate behaviour are all covered.
+- Logs are sufficient for another member to diagnose it without a debugger.
+- It is merged and exercised in the integrated build, not only on its author's
+  branch.
 
 ---
 
@@ -1561,6 +1772,8 @@ Steps 6–8 are the graded core. Rehearse until they run without hesitation.
 | In-memory storage only | D18 |
 | Optional: client and server in different languages | D2 **[HARD PATH]** |
 | Demo with clients and server on different computers | §18 |
+| Report cover lists members and each member's work percentage | §24.1, §25 |
+| All source packed into one file; one submitter; no resubmission | §23, §25 |
 
 ---
 
@@ -1568,26 +1781,41 @@ Steps 6–8 are the graded core. Rehearse until they run without hesitation.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Cross-language server not finished in time | loses the optional credit | phased delivery (§17); phase 2 is submittable alone |
-| Cross-language byte mismatch found late | integration stalls | conformance vector built in phase 3, before the C++ server |
-| Winsock/BSD divergence on the demo machine | server will not build on the day | fix the server OS before writing C++; `make PLATFORM=` covers both |
-| Firewall blocks UDP between laptops | demo fails | test the three-machine path in advance on a known-good network |
-| Client/server semantics mismatch during experiments | results look valid but mean nothing | `semantics` header field, warned on mismatch (D19) |
+| **Server run under WSL2 is unreachable from other machines** | **three-machine demo fails on the day** | WSL2 NATs by default, so a LAN peer cannot reach a server inside it. Either set `networkingMode=mirrored` in `.wslconfig` and verify from a second machine, or run the server on native Linux or native Windows. Test this at M1, not at M8. |
+| Late integration of separately written code | high — the classic group-project failure | integrate daily; `main` always builds; M2 vertical slice before feature work splits; no exchanging archives |
+| Protocol drift between the two implementations | high | Part I frozen at M0; changes only by a review that both implementers sign off; conformance vector as a golden test |
+| Cross-language server not finished in time | loses the optional credit | phased delivery (§17); M5 is submittable alone |
+| Cross-language byte mismatch found late | integration stalls | conformance vector built at M6 *before* the second implementation |
+| Winsock/BSD divergence on the demo machine | server will not build on the day | fix the server OS at M0; it changes the server from its first line |
+| Firewall blocks UDP between laptops | demo fails | test the three-machine path early on the network the demo will use |
+| Client/server semantics mismatch during experiments | results look valid but mean nothing | `semantics` header field, rejected on mismatch (D19) |
 | History TTL shorter than the retry window | at-most-once silently degrades | startup check enforces the constraint (D8) |
+| Reused request ID replays the wrong reply | silent wrong answer | request fingerprint, `ERR_REQUEST_ID_CONFLICT` (D24) |
+| Monitor expiry never fires on an idle server | registrations outlive their interval | bounded socket wait (§6.1); regression test T15 |
+| Probabilistic loss does not fire during the demo | the graded point is not made | deterministic `--drop-first-*` rules (D25) |
 | Callback loss mistaken for a bug during marking | looks like a defect | `callbackSeq` and `MONITOR_END` report gaps explicitly |
 | Truncation on route query goes unnoticed | silent wrong answer | explicit `truncated` flag in the reply |
-| Single-file submission omits a source file | incomplete submission | scripted packaging step; no resubmission is permitted |
+| Generated code looks plausible but breaks a contract | high | small reviewed changes; tests before merge; the author explains what it does |
+| Report claims do not match the final code | medium | every claim validated against logs from the tagged commit |
+| Single-file submission omits a source file | incomplete submission | scripted packaging step; **no resubmission is permitted** |
 
 ---
 
 ## 21. Assumptions and boundaries
 
 - Requests are separated enough in time for a single-threaded server, per the brief.
-- Flight data, bookings and reply history are memory-resident. Guarantees cover one
-  server process lifetime; a restart clears all state, and the report discloses this
-  where it affects an experiment.
-- Route matching is case-normalised exact text. No fuzzy matching, no partial matches.
-- Departure times are in one agreed timezone; no conversion is performed.
+  The server nonetheless polls on a timer so monitor expiry does not depend on
+  traffic arriving (§6.1).
+- Flight data, bookings and reply history are memory-resident. **The at-most-once
+  guarantee covers one server process lifetime only.** A restart clears all state,
+  and the report discloses this wherever it affects an experiment.
+- The route dataset is small enough that `QUERY_BY_ROUTE` may scan it linearly.
+- Route matching is case-normalised exact text. No fuzzy or partial matching.
+- Place names are UTF-8 on the wire; the seeded dataset is expected to be ASCII.
+- Departure times are UTC. No local timezone is placed on the wire and no conversion
+  is performed.
+- All expiry and timeout decisions use a monotonic clock, so no behaviour depends on
+  wall-clock adjustments.
 - `clientId` is client-asserted and unverified. Authentication, authorisation and
   encryption are outside the course scope (D5).
 - Callback delivery is observable but not guaranteed (D10).
@@ -1601,10 +1829,10 @@ deliberately excluded: they are not part of the UDP learning objectives the brie
 
 ## 22. Open decisions
 
-Three items need group agreement before phase 2 starts. Each is a genuine fork, not a
-detail.
+Three items need group agreement at M0, before feature work splits. Each is a genuine
+fork, not a detail.
 
-### 22.1 Language pairing — **blocks phases 2 and 4**
+### 22.1 Language pairing — **blocks M0**
 
 | Option | Effect |
 |---|---|
@@ -1613,11 +1841,23 @@ detail.
 | C server + Java client | Same credit as option 1, but rebuilds a server that is already being written in C++. |
 
 Option 1 is the working assumption throughout this document: it is the only one that
-takes the credit without discarding work. If the group prefers option 2, then D2, D6,
-D15 and D23 all need revisiting — packed narrow types become the better choice once
-both ends are C++.
+takes the credit without discarding work.
 
-### 22.2 Which two extra operations — **blocks phase 2**
+**If the group chooses option 2**, four decisions invert, because each was decided on
+cross-language grounds that no longer apply:
+
+| Decision | Under option 2 |
+|---|---|
+| D23 uniform 4-byte width | Reverses. Narrow types are native and free in C++, so a packed 20-byte header, `uint16` lengths and a 6-byte date become the better choice. |
+| D6 time as five `int32` | Follows D23 — pack it. |
+| D15 `uint32` string lengths | Follows D23 — `uint16`. |
+| D21 no checksum | Reverses. The objection is that "CRC-32" names several variants two implementations must match; with one implementation that risk vanishes and the malformed-datagram tests get stronger. |
+
+Part I would need a revision pass, not a patch. Everything else — the fingerprint,
+the bounded event loop, the watermark, the deterministic fault rules, the operation
+semantics — is unaffected.
+
+### 22.2 Which two extra operations — **blocks M3**
 
 | Option | Effect |
 |---|---|
@@ -1627,14 +1867,81 @@ both ends are C++.
 Both satisfy the brief. The choice is whether the stronger demonstration is worth the
 booking ledger. See D9 and D22 for the full argument.
 
-### 22.3 Server operating system — **blocks phase 4**
+### 22.3 Server operating system — **blocks M6**
 
 Winsock and BSD sockets diverge from the first line of the server. Fix the demo
-machine's OS before anyone writes socket code.
+machine's OS before anyone writes socket code, and see the WSL2 entry in §20 before
+choosing it.
 
 ---
 
-## 23. Administration
+## 23. Settled from the brief
+
+These are points that look like open design questions but are answered by
+`docs/Course Project.pdf`. They are recorded here so they are not reopened.
+
+| Question | Answer |
+|---|---|
+| Flight fields | Fixed: identifier (integer), source and destination (variable-length strings), departure time (*"design your own data structure"*), airfare (**floating-point value**), seat availability (integer). `totalSeats` is our addition, needed for the §2.4 invariant. |
+| Initial dataset | No mandatory records and no file format. Persistence is not compulsory; in-memory is the stated minimum. A version-controlled fixture is ours to choose. |
+| Operation names, opcodes, argument order | Ours. The brief fixes the four services semantically and nothing about their encoding. |
+| Fare representation | **Floating point, settled.** The brief says "the airfare (floating-point value)". Integer currency units are excluded. `float` versus `double` is ours (D16). |
+| Route matching rules and string limits | Ours. The brief says only that the places are variable-length strings and suggests length prefixes. |
+| Monitor interval bounds | Ours. The brief specifies no range. |
+| Command-line syntax | Ours. The brief requires only that the server address and port, and the semantics choice, are *passable* as arguments. Named options satisfy it. |
+| Application-level checksum | Permitted, not required — the brief is silent. Whether to carry one is D21, and it depends on §22.1. |
+| Submission format | **One file** containing all source. **No resubmission** — submit only the final version. One member submits for the whole group. |
+| Report cover page | Must list every member **and the percentage of work each contributed**. This is explicit in the brief and easy to overlook. |
+| Demonstration | Clients and server on **different computers**. The callback demonstration needs two clients on two machines plus the server. |
+
+The brief also states: *"For the remaining design and implementation details, make
+your own reasonable assumptions and decisions."* Anything not listed above or in §22
+is a recorded choice, not a pending question, and should be defended in the report
+rather than deferred.
+
+---
+
+## 24. Team workflow and ownership
+
+Four members, and the report must attribute a work percentage to each. The
+allocation below gives every member an assessable deliverable while keeping the wire
+contract owned by the people who can review it.
+
+### 24.1 Ownership
+
+| Role | Primary deliverables | Review boundary |
+|---|---|---|
+| **A — Protocol and client** | Part I constants, codec, client command parser, request IDs, retry loop, reply/callback demultiplexing | B reviews protocol changes; C supplies test vectors |
+| **B — Server and state** | event loop, dispatcher, repository, services, booking ledger, history, subscriptions, callback generation | A reviews service-facing protocol use; C supplies scenarios |
+| **C — Integration and testing** | §14 matrix, deterministic scenario scripts, evidence capture, merge coordination, clean-machine smoke tests | owns acceptance, **not** unilateral protocol design |
+| **D — Documentation and demo** | report, this document's consistency with the code, diagrams, slides, demo narration, final packaging | validates every claim against logs from the tagged commit |
+
+### 24.2 Repository discipline
+
+- One repository. **Do not exchange source archives as the normal workflow** — the
+  single most common way a four-person project fails is four divergent copies merged
+  the night before.
+- Short branches (`feat/client-retry`, `test/reply-loss`), opened as draft pull
+  requests early so interface collisions surface before the work is finished.
+- `main` stays buildable. Integrate at least once per working day.
+- A change to Part I — a field, opcode, status code, invariant or retry rule — is its
+  own reviewed change, never buried inside a feature.
+- Tag the final tested commit and generate every piece of report evidence from that
+  tag, not from a local copy.
+
+### 24.3 Evidence package
+
+For each demonstrated scenario, save the command lines, seed and active fault rules,
+commit hash, server log, client logs, and one sentence of expected-versus-observed.
+Name them consistently, for example
+`evidence/E04_at_least_once_cancel_reply_loss/server.log`.
+
+The report's experiment section is written from these files. Capturing them as the
+experiments run costs nothing; reconstructing them afterwards is not possible.
+
+---
+
+## 25. Administration
 
 | | |
 |---|---|

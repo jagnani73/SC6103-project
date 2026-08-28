@@ -76,7 +76,7 @@ this file is the short form.
 width is what keeps two independent implementations honest. This rule is
 load-bearing — see `README.md` D23.
 
-Fixed 36-byte header:
+Fixed 40-byte header:
 
 ```
  0  uint32  magic        0x53433631 ("SC61")
@@ -88,11 +88,23 @@ Fixed 36-byte header:
 24  int32   requestId    monotonic per client
 28  int32   ackUpTo      requests only; history-pruning watermark
 32  int32   status       replies and callbacks only
+36  int32   payloadLen   exact body length; check against the datagram length
 ```
 
 A request is identified by **(clientId, requestId)** — not by network address. That
 pair keys both the reply history and the booking ledger. The observed source
 endpoint is used only to address callbacks.
+
+Two rules that are easy to violate and expensive to debug:
+
+- **The server's socket wait must be bounded** by the time until the next monitor
+  expiry. A blocking `recvfrom` means registrations outlive their interval on an idle
+  server, and `MONITOR_END` never fires. Regression test T15 exists for this.
+- **At-most-once history entries carry a request fingerprint** — a hash of opcode plus
+  body. A key hit with a different fingerprint is `ERR_REQUEST_ID_CONFLICT`, not a
+  replay. The fingerprint stays server-side and never crosses the wire.
+
+All expiry and timeout decisions use a monotonic clock, never wall-clock time.
 
 | # | Operation | Idempotent |
 |---|---|---|
@@ -106,19 +118,15 @@ endpoint is used only to address callbacks.
 Invocation semantics are selected by CLI flag and carried in the header. The server
 is single-threaded on the request path.
 
-## Delivery phases
+## Delivery
 
-The bonus must not endanger the baseline, so build in this order and keep every
-phase working:
+Milestones M0–M8 are in `README.md` §17. The ordering rule: **M6 (the cross-language
+server) does not start before M4 demos cleanly.** If M6 runs out of time, M5 is a
+complete and submittable project that forfeits only the optional credit.
 
-1. **`README.md` Part I frozen** — it is the contract between two implementations
-   that share no code.
-2. **Java client + Java server.** The baseline deliverable and the fallback demo.
-3. **Conformance vector** (`README.md` §11.2) in both languages, byte-identical.
-4. **C++ server**, written against Part I. The Java server is retained as a test
-   oracle — point the Java client at both and diff responses.
-
-Do not start phase 4 before phase 2 demos cleanly end to end on two machines.
+The conformance vector (`README.md` §11.2) is built at M6 *before* the second
+implementation, not after — it is what catches alignment and endianness faults while
+they are still cheap.
 
 ## Working on this repo
 
@@ -152,15 +160,21 @@ Do not start phase 4 before phase 2 demos cleanly end to end on two machines.
 
 ## Open decisions
 
-Three forks need group agreement before phase 2. Full argument in `README.md` §22.
+Three forks need group agreement at M0. Full argument in `README.md` §22.
 
 1. **Language pairing** — C++17 server + Java client (assumed), versus C++ both ends
    (forfeits the credit), versus C server + Java client (discards existing work).
-   Blocks phases 2 and 4.
+   Choosing C++ both ends inverts D6, D15, D21 and D23.
 2. **Which two extra operations** — `CANCEL_SEATS`/`SET_RESERVATION` on seats
    (assumed; corruption visible live to a monitoring client) versus
-   `ADJUST_FARE`/`SET_FARE` on airfare (less work, weaker demo). Blocks phase 2.
+   `ADJUST_FARE`/`SET_FARE` on airfare (less work, weaker demo).
 3. **Server operating system** — decides Winsock versus BSD sockets, and changes the
-   server from its first line. Blocks phase 4.
+   server from its first line. Note the WSL2 warning in `README.md` §20: a server
+   inside WSL2 is unreachable from other LAN machines under default networking, which
+   would break the required three-machine demo.
+
+Questions that *look* open but are already answered by the brief — fare type, dataset
+format, opcode numbering, CLI syntax, submission packaging — are recorded in
+`README.md` §23. Do not reopen them.
 
 Group membership and the work split are also still open.
