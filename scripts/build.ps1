@@ -145,10 +145,31 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host 'Compiled OK.'
 Write-Host ''
 
-# ---- Run the conformance vectors --------------------------------------------
+# ---- Run the test suites ----------------------------------------------------
 #
-# The test prints one line per assertion and exits nonzero on any failure, so its
-# exit code is this script's exit code.
+# Two suites, in order of scope. Each prints one line per assertion and exits
+# nonzero on any failure.
+#
+#   ConformanceTest      the wire format: are the right bytes produced
+#   ClientBehaviourTest  the request-reply layer: retry, discard, callbacks
+#
+# The conformance suite runs first because a behavioural failure caused by a
+# marshalling fault is far easier to read when the marshalling result is already
+# on screen above it. Both run even if the first fails, so one broken suite does
+# not hide the state of the other; the script exits nonzero if either did.
+
+$failures = 0
 
 & $jdk.Java '-cp' $outDir 'sc6103.conformance.ConformanceTest'
-exit $LASTEXITCODE
+if ($LASTEXITCODE -ne 0) { $failures++ }
+Write-Host ''
+
+& $jdk.Java '-cp' $outDir 'sc6103.client.ClientBehaviourTest'
+if ($LASTEXITCODE -ne 0) { $failures++ }
+
+if ($failures -gt 0) {
+    Write-Host ''
+    Write-Host "$failures of 2 suites FAILED" -ForegroundColor Red
+    exit 1
+}
+exit 0

@@ -120,14 +120,33 @@ javac --release 17 -encoding US-ASCII -Xlint:all -d "$OUT_DIR" "$@"
 echo "Compiled OK."
 echo ""
 
-# ---- Run the conformance vectors --------------------------------------------
+# ---- Run the test suites ----------------------------------------------------
 #
-# The test prints one line per assertion and exits nonzero on any failure, so its
-# exit code is this script's exit code. set -e would abort before the trap could
-# report anything useful, so the status is captured and returned explicitly.
+# Two suites, in order of scope. Each prints one line per assertion and exits
+# nonzero on any failure.
+#
+#   ConformanceTest      the wire format: are the right bytes produced
+#   ClientBehaviourTest  the request-reply layer: retry, discard, callbacks
+#
+# The conformance suite runs first because a behavioural failure caused by a
+# marshalling fault is far easier to read with the marshalling result already on
+# screen above it. Both run even if the first fails, so one broken suite does not
+# hide the state of the other. set -e is lifted around them: it would abort on the
+# first nonzero status before the second suite ran.
+
+FAILURES=0
 
 set +e
 java -cp "$OUT_DIR" sc6103.conformance.ConformanceTest
-STATUS=$?
+[ $? -ne 0 ] && FAILURES=$((FAILURES + 1))
+echo ""
+java -cp "$OUT_DIR" sc6103.client.ClientBehaviourTest
+[ $? -ne 0 ] && FAILURES=$((FAILURES + 1))
 set -e
-exit "$STATUS"
+
+if [ "$FAILURES" -gt 0 ]; then
+    echo ""
+    echo "$FAILURES of 2 suites FAILED" >&2
+    exit 1
+fi
+exit 0
