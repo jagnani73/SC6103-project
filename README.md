@@ -7,22 +7,24 @@ byte-level marshalling, timeouts and retransmission, duplicate filtering, reply
 histories, and server-to-client callbacks. No RPC framework is used; implementing
 that layer is the assignment.
 
-**Status:** design complete, implementation not started. Three decisions still need
-group sign-off — see [§22 Open decisions](#22-open-decisions).
+**Status:** design frozen. All three M0 forks closed on 3 September 2026 — see
+[§22 Decisions closed](#22-decisions-closed). The shared marshalling layer and its
+conformance suite are implemented; client and server are not started.
 
 ### How this document is organised
 
 | Part | Contains | Read it when |
 |---|---|---|
 | **I — Specification** | What the system *is*. Normative, no argument. | Implementing. Both implementations are written from Part I alone. |
-| **II — Design rationale** | Why each choice was made, and what was rejected. Decision records `D1`–`D23`. | Defending the design, or writing the report. |
+| **II — Design rationale** | Why each choice was made, and what was rejected. Decision records `D1`–`D25`, one withdrawn. | Defending the design, or writing the report. |
 | **III — Delivery** | Experiments, tests, build, phases, demo, traceability, risk. | Planning and running the work. |
 
 Part I states rules and cross-references the rationale as `→ D4`. Nothing is argued
 twice.
 
-Where the brief offers a choice, the harder option is taken deliberately to compete
-for the optional credit. Those are marked **[HARD PATH]**.
+Where the brief offers a choice, the harder option is taken **when the difficulty
+buys marks**. Those are marked **[HARD PATH]**. The one place the cheaper option was
+deliberately chosen is recorded in D9, with the argument, rather than left implicit.
 
 ---
 
@@ -56,7 +58,7 @@ for the optional credit. Those are marked **[HARD PATH]**.
 19. [Requirement traceability](#19-requirement-traceability)
 20. [Risk register](#20-risk-register)
 21. [Assumptions and boundaries](#21-assumptions-and-boundaries)
-22. [Open decisions](#22-open-decisions)
+22. [Decisions closed](#22-decisions-closed)
 23. [Settled from the brief](#23-settled-from-the-brief)
 24. [Team workflow and ownership](#24-team-workflow-and-ownership)
 25. [Administration](#25-administration)
@@ -92,7 +94,7 @@ The two middle layers are what the project asks students to build and what the
 brief forbids obtaining from a framework.
 
 **[HARD PATH]** The server and client are written in **different languages** —
-working assumption **C++17 server, Java client**, pending group sign-off. → D2, §22
+**C++17 server, Java client**, settled at §22.1. → D2
 
 ### Component responsibilities
 
@@ -102,8 +104,8 @@ working assumption **C++17 server, Java client**, pending group sign-off. → D2
 | Client reliability layer | Owns `(clientId, requestId)`, applies timeout/retry policy, accepts only matching replies |
 | Binary codec | Marshals and unmarshals headers and bodies with strict bounds and byte-order conversion |
 | Server dispatcher | Validates magic/version, selects the operation, applies duplicate policy, builds the status reply |
-| Flight services | Query, reserve, monitor, cancel and set-reservation business rules |
-| State managers | Flight repository, reply history, monitor registry, booking ledger, loss-simulator config |
+| Flight services | Query, reserve, monitor, and the two fare-mutation business rules |
+| State managers | Flight repository, reply history, monitor registry, loss-simulator config |
 
 ---
 
@@ -117,9 +119,9 @@ working assumption **C++17 server, Java client**, pending group sign-off. → D2
 | `source` | `string` | max 63 bytes |
 | `destination` | `string` | max 63 bytes |
 | `departureTime` | `Time` | §2.2 |
-| `airfare` | `float32` | IEEE-754 binary32 → D16 |
-| `totalSeats` | `int32` | fixed at seed time |
-| `seatsAvailable` | `int32` | mutable; the state all experiments observe |
+| `airfare` | `float32` | IEEE-754 binary32; **mutable** by operations 5 and 6 → D16, D9 |
+| `totalSeats` | `int32` | fixed at seed time; the baseline the `RESERVE` experiments compare against |
+| `seatsAvailable` | `int32` | mutable by `RESERVE`; what the callback mechanism reports |
 
 ### 2.2 Time  → D6
 
@@ -131,28 +133,41 @@ seconds.
 
 A client generates a random nonzero **`clientId`** (`uint32`) once at process start
 and carries it in every request header. That identifier, paired with `requestId`,
-is the reply-history key and the owner key in the booking ledger.
+is the reply-history key.
 
 The **observed source IP and port** of a datagram is used for one purpose only:
 addressing callbacks. It is never read from the payload, so a client cannot direct
 callbacks at a third party.
 
-### 2.4 Booking ledger **[HARD PATH]**  → D9, D22
+There is no per-client ownership of any resource. Every operation acts on global
+flight state, so no operation needs to know who booked what. → D9
+
+### 2.4 Mutable state and the experiment oracle
+
+Exactly two fields change after seeding:
+
+| Field | Changed by | Arithmetic |
+|---|---|---|
+| `seatsAvailable` | `RESERVE` | relative decrement |
+| `airfare` | `ADJUST_FARE`, `SET_FARE` | relative, then absolute |
+
+Because both are single scalars mutated by a known number of client-issued
+operations, each experiment in §13 carries an **exact expected value** computed
+from the seed data and the trial script:
 
 ```
-bookings : map (clientId, flightId) -> int32 seatsHeld
+expected seatsAvailable  =  totalSeats − Σ (seats reserved by successful RESERVE)
+expected airfare         =  seededFare + Σ (deltas of successful ADJUST_FARE)
+                            or, if a SET_FARE succeeded last, that target exactly
 ```
 
-Invariant, asserted after every mutation:
+The server recomputes and logs the expected value alongside the observed one after
+every mutation, and a divergence is logged at `ERR_SERVER_ERROR` severity. A
+divergence is the signature of at-least-once re-execution, which is what makes the
+§13 experiments self-checking rather than requiring manual inspection.
 
-```
-flight.seatsAvailable  =  flight.totalSeats  −  Σ seatsHeld over all clients
-```
-
-A violation is logged at `ERR_SERVER_ERROR` severity. It is the signature of
-at-least-once corruption, which makes the experiments in §13 self-checking.
-
-Bookings persist for the server process lifetime and are never expired. → D22
+No ownership table is needed to do this, which is the direct benefit of the fare pair
+over the seat pair rejected in D9.
 
 ### 2.5 Monitor registry
 
@@ -220,10 +235,10 @@ Every datagram begins with a fixed **40-byte** header.
 | 4 | `int32` | `version` | protocol version, currently 1. Mismatch: `ERR_VERSION_MISMATCH`. |
 | 8 | `int32` | `messageType` | 0 = REQUEST, 1 = REPLY, 2 = CALLBACK, 3 = MONITOR_END |
 | 12 | `int32` | `opCode` | §4; 0 on CALLBACK and MONITOR_END |
-| 16 | `int32` | `semantics` | 0 = at-least-once, 1 = at-most-once |
+| 16 | `int32` | `semantics` | 0 = at-least-once, 1 = at-most-once. **Echoed unchanged in REPLY, CALLBACK and MONITOR_END.** |
 | 20 | `uint32` | `clientId` | random nonzero, fixed for the client's lifetime |
 | 24 | `int32` | `requestId` | monotonic per client; echoed in the reply |
-| 28 | `int32` | `ackUpTo` | requests only; highest `requestId` this client has a reply for, or −1 |
+| 28 | `int32` | `ackUpTo` | requests only; highest `requestId` this client has a reply for. **−1 when the client holds no reply yet, and −1 in every non-REQUEST message.** |
 | 32 | `int32` | `status` | replies and callbacks only; 0 in requests |
 | 36 | `int32` | `payloadLen` | exact body length in bytes, 0 to `MAX_BODY` |
 
@@ -235,6 +250,19 @@ in the opposite mode outright, rather than serving it and producing experimental
 results that look valid and mean nothing. `payloadLen` is redundant with the datagram length on a
 well-formed message, which is the point: `received == HEADER_SIZE + payloadLen` is a
 one-line truncation and disagreement check that runs before anything is decoded.
+
+Two rules above are stated because leaving them implicit lets the two implementations
+disagree on bytes neither side reads, which then shows up as a conformance-vector
+failure with no obvious cause:
+
+- **`ackUpTo` is −1, not 0, outside a REQUEST.** Zero is a legal watermark meaning "I
+  hold the reply for request 0", so it cannot double as "unused". A C++ header struct
+  that is zero-initialised writes 0 here; a Java builder defaulting to the sentinel
+  writes −1. Both are defensible in isolation and they differ on the wire.
+- **`semantics` is echoed rather than zeroed.** The field exists so a mode mismatch is
+  refused rather than silently served (D19); echoing it lets the client confirm the
+  server agreed, and keeps a packet capture self-describing without reference to the
+  request that provoked it.
 
 ### 3.5 Size limits
 
@@ -317,14 +345,14 @@ Relative decrement of the seat pool. Atomic check-and-decrement.
 | **Request** | `int32` | `flightId` |
 | | `int32` | `numSeats` ≥ 1 |
 | **Reply** | `int32` | `seatsAvailable` after |
-| | `int32` | `seatsHeldByClient` after |
 
 Errors: `ERR_UNKNOWN_FLIGHT`, `ERR_INSUFFICIENT_SEATS`.
-Fires callbacks on success (§9).
+Fires callbacks on success (§9). **The only operation that does.**
 
-Both counters are returned so that under at-least-once with a lost reply, the second
-execution returns a *different* `seatsAvailable` from the first — the corruption is
-visible in the reply itself, not only in a later query.
+The post-state is returned rather than a bare acknowledgement so that under
+at-least-once with a lost reply, the second execution returns a *different*
+`seatsAvailable` from the first — the corruption is visible in the reply itself, not
+only in a later query.
 
 ---
 
@@ -347,45 +375,56 @@ client then blocks for the interval (§7.3).
 
 ---
 
-### Op 5 — `CANCEL_SEATS` · **non-idempotent** · **[HARD PATH]**
+### Op 5 — `ADJUST_FARE` · **non-idempotent**
 
-Release *n* seats from this client's own booking. Relative increment of the pool.
+Add a signed `delta` to a flight's airfare. Relative arithmetic on a single scalar.
 The brief's required non-idempotent extra operation. → D9
 
 | | Type | Field |
 |---|---|---|
 | **Request** | `int32` | `flightId` |
-| | `int32` | `numSeats` ≥ 1 |
-| **Reply** | `int32` | `seatsAvailable` after |
-| | `int32` | `seatsHeldByClient` after |
+| | `float32` | `delta` — finite; may be negative |
+| **Reply** | `float32` | `airfare` after |
 
-Errors: `ERR_UNKNOWN_FLIGHT`, `ERR_NOT_ENOUGH_HELD`.
-Fires callbacks on success.
+Errors: `ERR_UNKNOWN_FLIGHT`, `ERR_INVALID_FARE`, `ERR_INVALID_ARGUMENT`.
+Does **not** fire callbacks — the monitor mechanism reports seat availability only
+(§9), which is the cost accepted in D9.
 
-Replaying this request releases seats the client no longer holds, breaking the §2.4
-invariant. That is the failure §13 measures.
+`ERR_INVALID_FARE` is returned when the *resulting* fare would leave the legal range
+`0 < fare ≤ MAX_FARE`; the stored value is unchanged in that case.
+`ERR_INVALID_ARGUMENT` covers a `delta` that is NaN or infinite, rejected at the codec
+before it is ever applied (§3.6 step 6).
+
+This is deck 2's canonical non-idempotent operation — *"increasing a variable by 3:
+2 + 3 = 5; 5 + 3 = 8; 8 + 3 = 11"* — instantiated on a real field. Replaying it applies
+the delta twice, so the fare diverges from the expected value of §2.4. That is the
+failure §13 measures.
 
 ---
 
-### Op 6 — `SET_RESERVATION` · **idempotent** · **[HARD PATH]**
+### Op 6 — `SET_FARE` · **idempotent**
 
-Set this client's booking on a flight to exactly `targetSeats`. Absolute assignment.
+Set a flight's airfare to exactly `newFare`. Absolute assignment.
 The brief's required idempotent extra operation. → D9
 
 | | Type | Field |
 |---|---|---|
 | **Request** | `int32` | `flightId` |
-| | `int32` | `targetSeats` ≥ 0 (0 releases the whole booking) |
-| **Reply** | `int32` | `seatsAvailable` after |
-| | `int32` | `seatsHeldByClient` after — equals `targetSeats` on success |
+| | `float32` | `newFare` — finite, `0 < newFare ≤ MAX_FARE` |
+| **Reply** | `float32` | `airfare` after — equals `newFare` on success |
 
-Errors: `ERR_UNKNOWN_FLIGHT`, `ERR_INSUFFICIENT_SEATS`.
-Fires callbacks on success, **including when the delta is zero**, so a monitoring
-client observes that a duplicate arrived and changed nothing.
+Errors: `ERR_UNKNOWN_FLIGHT`, `ERR_INVALID_FARE`, `ERR_INVALID_ARGUMENT`.
+Does not fire callbacks, for the same reason as Op 5.
 
-The server computes `delta = targetSeats − currentlyHeld` and applies it. A second
-execution yields `delta = 0`, so the final state is identical. This is a genuine
-mutation that is nevertheless replay-safe.
+The server assigns rather than accumulates, so a second execution writes the same
+value and the final state is identical. This is a genuine mutation that is
+nevertheless replay-safe, which is the claim experiment E6 exists to demonstrate — and
+the reason the idempotent operation is a **write** rather than a read-only query
+(D9).
+
+**`MAX_FARE` is 100000.0f**, a shared constant alongside the §3.5 size limits. It
+exists so that "reject an out-of-range fare" is a testable boundary in both
+implementations rather than a matter of taste.
 
 ---
 
@@ -415,6 +454,11 @@ values) — the direct observable signal of at-least-once re-execution.
 Sent once when a registration expires. **Advisory only** — it is unacknowledged and
 may itself be lost, so the client's local deadline remains authoritative. → D20
 
+**Header:** identical in shape to CALLBACK — `messageType = 3`, `clientId` and
+`requestId` copied from the `MONITOR` registration that expired, `opCode = 0`,
+`status = 0`, `semantics` echoed, `ackUpTo = −1`. `requestId` is load-bearing: a
+client holding two registrations cannot otherwise tell which one ended.
+
 | Type | Field |
 |---|---|
 | `int32` | `flightId` |
@@ -434,7 +478,7 @@ than only detecting gaps between the ones that arrived.
 | 2 | `ERR_NO_ROUTE_MATCH` | no flight on that source/destination pair |
 | 3 | `ERR_INSUFFICIENT_SEATS` | request exceeds availability |
 | 4 | `ERR_INVALID_ARGUMENT` | out-of-range or nonsensical argument |
-| 5 | `ERR_NOT_ENOUGH_HELD` | cancelling more seats than the client holds |
+| 5 | `ERR_INVALID_FARE` | resulting airfare outside `0 < fare ≤ MAX_FARE`; stored value unchanged |
 | 6 | `ERR_MALFORMED_REQUEST` | body did not parse, or length disagreed |
 | 7 | `ERR_UNKNOWN_OPCODE` | opcode not in 1–6 |
 | 8 | `ERR_MONITOR_TABLE_FULL` | registry at capacity |
@@ -482,6 +526,11 @@ process_one_datagram(n, from, buf):
     if hdr.semantics != serverSemantics: send_error(ERR_SEMANTICS_MISMATCH,...); return
 
     log "RECV client={hdr.clientId} req={hdr.requestId} op={hdr.opCode}"
+
+    # ackUpTo must sit strictly below the requestId it rides on, or this request
+    # prunes its own history entry before the lookup below. See §8.3.
+    if hdr.ackUpTo >= hdr.requestId:
+        send_error(ERR_INVALID_ARGUMENT, hdr, from); return
     prune_history(hdr.clientId, hdr.ackUpTo)     # §8.3
 
     if serverSemantics == AT_MOST_ONCE:
@@ -504,13 +553,13 @@ process_one_datagram(n, from, buf):
     log "SEND req={hdr.requestId} status={status}"
     maybe_send(reply, from)
 
-    if status == OK and opCode in {RESERVE, CANCEL_SEATS, SET_RESERVATION}:
+    if status == OK and opCode == RESERVE:
         fire_callbacks(flightId, hdr.requestId)  # §9.2
 
-    assert_seat_invariant()                      # §2.4
+    assert_expected_state()                      # §2.4
 ```
 
-Five properties are load-bearing and belong in the report:
+Six properties are load-bearing and belong in the report:
 
 1. **Timer independence.** The socket wait is bounded by the nearest monitor expiry,
    never an unbounded block. Monitor expiry, `MONITOR_END` delivery and history
@@ -525,9 +574,12 @@ Five properties are load-bearing and belong in the report:
    lost in transit is still available to answer the retransmission.
 4. **Callbacks fire even when the reply is dropped.** A dropped reply models loss on
    the return path — the server did execute. This is what makes at-least-once
-   corruption visible to a monitoring client.
-5. **The invariant is asserted every iteration**, so corruption is detected when it
-   occurs rather than inferred later.
+   corruption on `RESERVE` visible to a monitoring client.
+5. **`ackUpTo` is validated before it is acted on.** A watermark at or above the
+   request's own `requestId` would erase the entry that request is about to need, so
+   it is refused rather than honoured. → §8.3
+6. **Expected state is asserted every iteration**, so divergence is detected when it
+   occurs rather than inferred later. → §2.4
 
 All expiry decisions use a **monotonic clock**. No protocol behaviour may depend on
 wall-clock time, which can jump.
@@ -542,8 +594,10 @@ sequentially.
 
 The flight table is seeded from a hard-coded array at startup. It must contain at
 least: two flights sharing a source/destination pair (multi-result queries), one
-flight on a distinct route, and one flight with a small seat count (fast
-exhaustion).
+flight on a distinct route, one flight with a small seat count (fast exhaustion), and
+a spread of airfares — including one high enough and one low enough that a small
+`ADJUST_FARE` delta can drive the result outside `0 < fare ≤ MAX_FARE` and exercise
+`ERR_INVALID_FARE` without a contrived argument.
 
 ---
 
@@ -612,7 +666,7 @@ Both are implemented and selected by a CLI flag on both programs at startup. →
 
 | Semantics | Client | Server on duplicate | Consequence |
 |---|---|---|---|
-| at-least-once | timeout, then resend the identical datagram up to R retries | execute every valid arrival; no history lookup | a duplicated `RESERVE` or `CANCEL_SEATS` changes state twice |
+| at-least-once | timeout, then resend the identical datagram up to R retries | execute every valid arrival; no history lookup | a duplicated `RESERVE` or `ADJUST_FARE` changes state twice |
 | at-most-once | same retry policy, same stable IDs | history hit replays the exact cached reply; new IDs execute once, then cache | both idempotent and non-idempotent operations stay correct under loss |
 
 Maybe-semantics is not implemented for the six operations. Callbacks and
@@ -620,8 +674,8 @@ Maybe-semantics is not implemented for the six operations. Callbacks and
 
 ### 8.1 At-least-once
 
-No history. Every request that arrives is executed. Correct for operations 1, 2 and
-6; corrupting for 3 and 5.
+No history. Every request that arrives is executed. Correct for operations 1, 2, 4
+and 6; corrupting for 3 and 5.
 
 ### 8.2 At-most-once
 
@@ -662,10 +716,27 @@ Three mechanisms, in order of precedence:
 
 Mechanism 1 does the work; 2 and 3 make the bound absolute.
 
-**Hard constraint:** `HISTORY_TTL_MS > timeoutMs × (maxRetries + 1)`. A TTL shorter
-than the client's maximum retry window would let an entry expire while a legitimate
-retransmission is still in flight, silently degrading at-most-once to at-least-once.
-This is checked at server startup and refuses to run if violated.
+**Hard constraint 1 — TTL floor.** `HISTORY_TTL_MS > timeoutMs × (maxRetries + 1)`. A
+TTL shorter than the client's maximum retry window would let an entry expire while a
+legitimate retransmission is still in flight, silently degrading at-most-once to
+at-least-once. This is checked at server startup and refuses to run if violated.
+
+**Hard constraint 2 — watermark ordering.** `ackUpTo < requestId` on every request,
+and the server **rejects** a request that violates it with `ERR_INVALID_ARGUMENT`
+before pruning (§6.1).
+
+Mechanism 1 prunes on receipt, *before* the duplicate lookup. That ordering is correct
+only while a request's watermark stays strictly below its own identifier — which holds
+for a correct client, because §7.2 raises `ackUpTo` only after a reply arrives and
+`requestId` has already advanced past it. It does not hold for a buggy one. A client
+that sent `ackUpTo == requestId` would have the server delete the very entry its
+retransmission depends on, and every retransmission would then be treated as new: at-most-once
+degrades to at-least-once precisely under the loss conditions it exists to handle,
+and the server reports nothing wrong.
+
+This is the same class of failure as D24's reused `requestId` and it takes the same
+answer — do not trust the client to be correct, check the invariant the mechanism
+depends on and fail loudly. The check is one comparison.
 
 ---
 
@@ -683,9 +754,15 @@ client cannot accumulate duplicate registrations by retransmitting.
 
 ### 9.2 Delivery  → D10
 
-On a successful `RESERVE`, `CANCEL_SEATS` or `SET_RESERVATION`, the server removes
-expired entries, snapshots the live registrants for that `flightId`, increments each
-registration's `callbackSeq`, and sends one callback per registrant.
+On a successful `RESERVE` — the only operation that changes seat availability — the
+server removes expired entries, snapshots the live registrants for that `flightId`,
+increments each registration's `callbackSeq`, and sends one callback per registrant.
+
+`ADJUST_FARE` and `SET_FARE` fire nothing. The brief scopes the monitor service to
+*"updates made to the seat availability information of a flight"*, and a fare change
+is not one. This is the disclosed cost of the fare pair (D9): at-least-once corruption
+of the *extra* operations is observed at the issuing client and in the server log
+rather than live on a third machine. `RESERVE` still supplies the live demonstration.
 
 Delivery is **fire and forget** — no acknowledgement, no retry, no history. That is
 *maybe* semantics in deck 3's taxonomy, and the report states so. `callbackSeq` and
@@ -808,6 +885,13 @@ into a signed Java `int` becomes an allocation bug if used directly.
 
 Both implementations must encode this record to **exactly** these 60 bytes.
 
+**This record is a marshaller anchor, not a datagram layout.** No operation in §4
+transmits a whole flight record — `QUERY_BY_ID` returns time, fare and seats, and
+`QUERY_BY_ROUTE` returns only identifiers. It exists because it exercises all four
+primitives of §3.3 in one fixture, with both padding cases and a float, and because it
+is the shape deck 2 uses for its own CDR worked example. It deliberately omits
+`totalSeats`, which is server-side seed state and never crosses the wire.
+
 ```
 flightId       = 1934
 source         = "Singapore"
@@ -857,7 +941,7 @@ was chosen, why, what else was considered, and why it was rejected.
 | D6 | Time as five `int32` fields | |
 | D7 | Both invocation semantics, runtime-selected | mandated |
 | D8 | History bounded by piggybacked acknowledgement | |
-| D9 | The two extra operations | **[HARD PATH]** |
+| D9 | The two extra operations | |
 | D10 | Callbacks fire-and-forget with sequence numbers | |
 | D11 | Single-threaded server, blocking monitor client | |
 | D12 | In-process fault injection, seeded, after encoding | |
@@ -870,7 +954,7 @@ was chosen, why, what else was considered, and why it was rejected.
 | D19 | Magic, version and semantics guards | |
 | D20 | `MONITOR_END` as an advisory message | |
 | D21 | No application-level checksum | |
-| D22 | Bookings are never expired | |
+| D22 | ~~Bookings are never expired~~ | **withdrawn** |
 | D23 | Uniform 4-byte field width | |
 | D24 | Request fingerprints in the history | |
 | D25 | Deterministic fault rules alongside probabilistic loss | |
@@ -892,8 +976,8 @@ comparison something to compare.
 
 ### D2 — Server and client in different languages **[HARD PATH]**
 
-**Decision.** The two programs are written in different languages. Working
-assumption: **C++17 server, Java client.** Needs group sign-off — §22.
+**Decision.** The two programs are written in different languages: **C++17 server,
+Java client.** Closed at §22.1 on 3 September 2026.
 
 **Reasoning.** The brief offers optional credit: "An additional but optional
 requirement is to implement the client and the server in different programming
@@ -992,9 +1076,8 @@ own messages.
 ### D5 — Request identity: `(clientId, requestId)`
 
 **Decision.** The client generates a random nonzero `clientId` at process start and
-sends it in every header. The history and booking ledger are keyed on
-`(clientId, requestId)`. The observed source endpoint is used only to address
-callbacks.
+sends it in every header. The reply history is keyed on `(clientId, requestId)`. The
+observed source endpoint is used only to address callbacks.
 
 **Reasoning.** Deck 2 defines the unique request identifier as `requestId` "+ an
 identifier for the client process (e.g., Internet address + port number)". The
@@ -1024,9 +1107,9 @@ Decoupling identity from the network endpoint fixes two real failure modes:
 - *`requestId` alone.* Incorrect; two clients collide on their first request.
 
 **Disclosed limitation.** `clientId` is client-asserted and unverified: a malicious
-client could impersonate another and read its cached replies or manipulate its
-bookings. Out of scope for the course (§21), but it is the honest cost of moving
-identity off the transport, and the report should say so.
+client could impersonate another and read its cached replies. Out of scope for the
+course (§21), but it is the honest cost of moving identity off the transport, and the
+report should say so.
 
 ---
 
@@ -1084,10 +1167,18 @@ silent and severe: an entry expires mid-retry, the retransmission is treated as 
 and at-most-once degrades to at-least-once precisely under the loss conditions it
 exists to handle.
 
+The watermark-ordering constraint (§8.3) is the same failure reached by a different
+route. Pruning happens on receipt, before the duplicate lookup, so a request whose
+`ackUpTo` reached its own `requestId` would delete the entry its retransmission needs.
+A correct client cannot produce that, which is exactly why the server must check it:
+the guarantee exists for the case where something has already gone wrong.
+
 **Alternatives rejected.**
 
 - *Unbounded history.* Correct but unbounded; the deck flags this as the problem to
   solve.
+- *Trusting `ackUpTo` unvalidated.* Saves one comparison and reintroduces a silent
+  degradation of the mechanism the field exists to serve.
 - *TTL and LRU only.* Sound, and strictly weaker: both are heuristics that discard
   entries on a guess about when the client is finished, whereas the watermark is exact
   information the client already has. Retained here as backstops rather than as the
@@ -1097,46 +1188,66 @@ exists to handle.
 
 ---
 
-### D9 — The two extra operations **[HARD PATH]**
+### D9 — The two extra operations
 
-**Decision.** `CANCEL_SEATS` (non-idempotent, relative) and `SET_RESERVATION`
-(idempotent, absolute), both writing to `seatsAvailable` through the per-client
-booking ledger.
+**Decision.** `ADJUST_FARE` (non-idempotent, relative) and `SET_FARE` (idempotent,
+absolute), both writing to the `airfare` field of the same flight record. No ownership
+model and no per-client state.
 
 **Reasoning.** The brief requires two extra operations, "one of them should be
 idempotent and the other should be non-idempotent". Choosing two *writes against the
-same state* means the pair differs in exactly one variable — relative arithmetic
+same field* means the pair differs in exactly one variable — relative arithmetic
 versus absolute assignment — so the experiment isolates idempotency as the cause of
-divergence. This mirrors deck 2's own contrast between "increasing a variable by 3"
-and operations whose repetition changes nothing.
+divergence rather than confounding it with the choice of target.
 
-Operating on **seats** rather than any other field is the substantive choice: seats
-are what the callback mechanism reports, so at-least-once corruption becomes visible
-in real time to a monitoring client. That is experiment E8, and it is the strongest
-thing in the demo.
+Deck 2 slide 76 defines the property with two examples: idempotent as set union
+(`{1,2} ∪ {3} = {1,2,3}; {1,2,3} ∪ {3} = {1,2,3}`) and non-idempotent as *"increasing a
+variable by 3: 2 + 3 = 5; 5 + 3 = 8; 8 + 3 = 11"*. `ADJUST_FARE` is that second example
+applied to a real scalar field, and `SET_FARE` is an assignment with the same
+absorbing property as the first. The pair instantiates the lecture's own illustration
+rather than paraphrasing it.
+
+Two secondary benefits, neither decisive on its own:
+
+- **It puts a `float32` in a request body.** Before these operations, §4 carried a
+  float in one direction only — `QUERY_BY_ID`'s reply. The brief requires marshalling
+  "the integer values, floating-point values and strings", and D16's bit-for-bit IEEE-754
+  transfer is now exercised in both directions across the language boundary, which is
+  where a cross-language fault would actually hide.
+- **The experiment oracle needs no ledger.** Expected fare is `seededFare + Σ deltas`,
+  computable from the seed data and the trial script alone (§2.4).
 
 **Alternatives rejected.**
 
-- *`SET_FARE` / `ADJUST_FARE` on the airfare field.* The same absolute-versus-relative
-  structure applied to a different field, and it satisfies the brief equally.
-  Rejected on two grounds: fare changes are invisible to the callback mechanism, so
-  the corruption cannot be demonstrated live to a monitoring client; and "any client
-  may rewrite any fare" is a business rule with no ownership model behind it. Its
-  genuine advantage is that it needs no booking ledger at all — see D22 for what that
-  ledger costs. This remains a live option; see §22.2.
+- *`CANCEL_SEATS` / `SET_RESERVATION` on a per-client booking ledger.* The prior
+  working assumption, and a genuinely stronger demonstration: seats are what the
+  callback mechanism reports, so at-least-once corruption of the *extra* operations
+  would be visible in real time on a third machine. Rejected because it buys that one
+  demo moment with a per-client ownership table the brief never asks for, an orphaned-booking
+  leak that has to be disclosed, and a `seatsHeldByClient` field on two reply bodies.
+  The decisive point is that `RESERVE` is already non-idempotent and already fires
+  callbacks, so the live corruption demo survives intact without the ledger — what the
+  seat pair uniquely added was watching an *idempotent* write replay harmlessly on the
+  monitoring machine, and that is a small return on a whole subsystem. See §22.2.
 - *A read-only query as the idempotent operation.* Much easier and the common choice.
   A read cannot corrupt state, so at-least-once trivially produces the right answer
   and the comparison demonstrates nothing. The interesting claim is that a **write**
-  can be replay-safe.
-- *`ADD_FLIGHT` / `DELETE_FLIGHT`.* Orthogonal to the seat state the rest of the
-  system is built around; needs its own test path and never touches the monitor
-  mechanism.
-- *`CANCEL_SEATS` on the global pool rather than a per-client booking.* Simpler, and
-  rejected because "cancel seats I never booked" is not meaningful and because without
-  ownership `SET_RESERVATION` has no well-defined subject.
+  can be replay-safe, and both surviving operations are writes.
+- *`ADD_FLIGHT` / `DELETE_FLIGHT`.* Orthogonal to the state the rest of the system is
+  built around; needs its own test path and never touches the monitor mechanism.
+- *Fare as fixed-point integer cents.* Correct engineering for money and rejected under
+  D16 — the brief names a floating-point value, and moving fare mutation onto integers
+  would discard the float-in-a-request benefit that motivates this pair.
 
-**Cost accepted.** Both require the booking ledger of §2.4, which the brief does not
-ask for, and which brings the orphaned-booking problem of D22.
+**Cost accepted.** Fare changes are invisible to the callback mechanism (§9.2), so
+experiment E6's idempotent-replay result is observed at the issuing client and in the
+server log rather than live on a monitoring machine. This is a real reduction in demo
+strength and the report should say so plainly rather than omit it.
+
+**Deviation noted.** This reverses the prior working assumption and is the one place
+where this project deliberately takes the cheaper of two compliant options. It is
+recorded rather than silent because `CLAUDE.md`'s standing posture is the opposite, and
+that file is updated in the same change.
 
 ---
 
@@ -1185,9 +1296,9 @@ correctness argument about invocation semantics rather than about locking.
 
 **Alternatives rejected.**
 
-- *Thread-per-request or a thread pool.* No marks, and it would force the history and
-  booking ledger to become thread-safe, introducing races a marker could mistake for
-  semantics bugs.
+- *Thread-per-request or a thread pool.* No marks, and it would force the reply history
+  and the flight repository to become thread-safe, introducing races a marker could
+  mistake for semantics bugs.
 - *A threaded client that stays interactive while monitoring.* The brief anticipates
   and permits the blocking design.
 
@@ -1417,34 +1528,24 @@ for a failure mode neither the transport nor the test plan leaves open.
 
 ---
 
-### D22 — Bookings are never expired
+### D22 — Bookings are never expired · **WITHDRAWN**
 
-**Decision.** The booking ledger persists for the server process lifetime. Seats held by
-a client that has exited are never reclaimed.
+**Status.** Withdrawn when §22.2 closed on the fare pair. There is no booking ledger,
+so there are no bookings to expire and nothing to disclose.
 
-**Reasoning.** This is a genuine limitation, disclosed rather than solved. Because
-identity is a generated `clientId` (D5), an exited client's seats can never be reclaimed
-even by the same user restarting, so the available pool leaks monotonically.
+The record is retained rather than renumbered because D-numbers are cited from source
+comments and from `tests/conformance/vectors.md`, and silently reusing 22 for something
+else would make those citations point at the wrong argument.
 
-It is accepted because the alternatives are worse for a demo. A TTL on bookings would
-make `SET_RESERVATION` non-deterministic across a long demo — the same request would
-produce different results depending on how long the client had been idle — and that is
-the operation whose determinism experiment E6 depends on.
+**What it said.** The ledger persisted for the server process lifetime, so seats held
+by an exited client were never reclaimed and the available pool leaked monotonically.
+A TTL was rejected because it would have made the idempotent extra operation
+non-deterministic across a long demo, which is the property experiment E6 depends on.
 
-Within one demo or experiment run the leak is invisible: the server is restarted between
-runs, and no client exits mid-experiment. The report should state the limitation and note
-that a production design would tie bookings to authenticated accounts with explicit
-cancellation, rather than to a transport-level or process-level identity.
-
-**Note.** This cost is a direct consequence of D9. Fare-based extra operations avoid it
-entirely by not tracking ownership at all, which is a real advantage of that alternative
-and is weighed in D9 and §22.2.
-
-**Alternatives rejected.**
-
-- *TTL on bookings.* Breaks E6's determinism, as above.
-- *An explicit release-on-quit message.* Best-effort over UDP, so it does not solve the
-  crash case, and adds an operation for a guarantee it cannot make.
+**Why it is gone.** The leak was a direct consequence of the per-client ownership
+model, and dropping that model in D9 removes it at the root rather than mitigating it.
+This was the strongest argument against the seat pair and it is recorded here so the
+report can show the cost was eliminated by a design choice, not overlooked.
 
 ---
 
@@ -1540,23 +1641,30 @@ operations in sequence and the interesting drop is rarely on the first one.
 
 The brief requires designing experiments to compare the two semantics and discussing
 the results. Each runs `N = 20` trials with server-side injection only (§10). The §2.4
-invariant gives an automatic pass/fail per trial.
+expected-value oracle gives an automatic pass/fail per trial.
 
 | # | Setup | Operation | Semantics | Expected |
 |---|---|---|---|---|
 | E1 | no loss | `RESERVE` | both | identical, correct |
 | E2 | `--drop-reply 0.5` | `RESERVE` | at-least-once | **over-reserves**; final seats below expected |
 | E3 | `--drop-reply 0.5` | `RESERVE` | at-most-once | correct; duplicates answered from history |
-| E4 | `--drop-reply 0.5` | `CANCEL_SEATS` | at-least-once | **over-releases**; invariant violated |
-| E5 | `--drop-reply 0.5` | `CANCEL_SEATS` | at-most-once | correct |
-| E6 | `--drop-reply 0.5` | `SET_RESERVATION` | at-least-once | **correct despite re-execution** |
+| E4 | `--drop-reply 0.5` | `ADJUST_FARE` | at-least-once | **over-adjusts**; fare diverges from expected |
+| E5 | `--drop-reply 0.5` | `ADJUST_FARE` | at-most-once | correct; duplicates answered from history |
+| E6 | `--drop-reply 0.5` | `SET_FARE` | at-least-once | **correct despite re-execution** |
 | E7 | `--drop-request 0.5` | `RESERVE` | both | correct — request loss alone does not discriminate |
 | E8 | `--drop-reply 0.5`, monitor active | `RESERVE` | at-least-once | monitor sees two callbacks with the **same `eventRequestId`** |
 | E9 | 200 requests | any | at-most-once | history stays bounded with `ackUpTo`, grows without it |
 | E10 | `--drop-callback 0.5` | `MONITOR` | — | monitor reports gaps in `callbackSeq`; `MONITOR_END` gives the true total |
 
 **E6 is the centrepiece.** It is the experiment a read-only idempotent operation could
-not produce: a genuine mutation, executed twice, ending in the correct state.
+not produce: a genuine mutation, executed twice, ending in the correct state. Pair it
+with E4 in the report — same field, same loss rate, same retry policy, differing only
+in relative versus absolute arithmetic. That is the isolation the whole design exists
+to achieve.
+
+**E4 and E5 are the pair the brief asks for by name**: "Show that at-least-once
+invocation semantics can lead to wrong results for non-idempotent operations, while
+at-most-once invocation semantics work correctly for all operations." 
 
 **E7 is worth reporting as a negative result.** It shows the discriminating failure is
 specifically *reply* loss, since a lost request is simply retried until it lands under
@@ -1566,8 +1674,15 @@ either semantics.
 on a second machine as it happens, and `eventRequestId` proves the two callbacks came
 from one user action rather than two.
 
-Record per trial: expected `seatsAvailable`, observed, retransmission count,
-server-side duplicate count, callbacks received versus sent, and invariant pass/fail.
+Record per trial: the mutated field's expected value, its observed value,
+retransmission count, server-side duplicate count, callbacks received versus sent, and
+oracle pass/fail.
+
+Fare comparisons are exact, not approximate. Every delta in the trial script is chosen
+to be representable in binary32 (halves, quarters, and integers), so an expected fare
+and an observed fare are compared bit-for-bit rather than within a tolerance. A
+tolerance would hide exactly the small divergence a single duplicated `ADJUST_FARE`
+produces.
 
 ---
 
@@ -1581,8 +1696,10 @@ server-side duplicate count, callbacks received versus sent, and invariant pass/
 | unit | every operation's request and reply body, round-tripped |
 | boundary | `QUERY_BY_ROUTE` returning 0, 1, `MAX_ROUTE_RESULTS`, `MAX_ROUTE_RESULTS + 1` matches |
 | boundary | `RESERVE` for exactly all remaining seats, and one more |
-| boundary | `CANCEL_SEATS` for exactly the held count, and one more |
-| boundary | `SET_RESERVATION` to 0, to current, and above capacity |
+| boundary | `ADJUST_FARE` landing exactly on `MAX_FARE`, and one increment past it |
+| boundary | `ADJUST_FARE` with a negative delta landing exactly above 0, and one past it into `ERR_INVALID_FARE` |
+| boundary | `SET_FARE` to the current value, to `MAX_FARE`, to 0 and to a negative value |
+| negative | `ADJUST_FARE` / `SET_FARE` with a NaN or infinite float argument → rejected at the codec, no state change |
 | negative | truncated datagram, oversized string length, negative length, unknown opcode, bad magic, wrong version, `payloadLen` disagreeing with the received length |
 | negative | reply arriving with a foreign `clientId` — must be discarded, not matched |
 | negative | NaN and ±infinity rejected wherever a float is decoded |
@@ -1701,7 +1818,7 @@ optional credit and nothing else.
 | M0 | Protocol freeze | Part I agreed; §22 decisions closed; shared constants written | every member can read one request's byte layout aloud; no field ambiguity remains |
 | M1 | Buildable skeleton | build targets, socket bind, receive loop, one stub operation | fresh clone builds on two machines; one datagram round-trips and is logged |
 | M2 | Vertical slice | `QUERY_BY_ID` end to end, one invalid-input path, codec unit tests | `main` demonstrates encode → UDP → decode → dispatch → reply → render |
-| M3 | Core services | all six operations, booking ledger, invariants, functional tests | operations pass their §14 boundary tests at zero loss |
+| M3 | Core services | all six operations, the §2.4 expected-value oracle, functional tests | operations pass their §14 boundary tests at zero loss |
 | M4 | Reliability semantics | retry loop, both semantics, fingerprints, deterministic drop rules | T10, T13 and experiments E1–E7 pass, with logs that visibly distinguish the modes |
 | M5 | Monitoring | `MONITOR`, callbacks, `callbackSeq`, idle expiry, `MONITOR_END` | T06, T11 and T15 pass with two monitoring clients |
 | M6 | Cross-language server | conformance vector (§11.2) in both languages, then the second implementation | both produce identical bytes; the Java client passes §14 integration diffed against the single-language server |
@@ -1731,15 +1848,18 @@ Three machines: server, client A (reserving), client B (monitoring).
 2. Client A: query by route, showing multiple matches. Then query by ID.
 3. Client B: `MONITOR` the flight for 60 s. Show the baseline snapshot.
 4. Client A: `RESERVE 2`. Client B prints the callback. Show `seatsAvailable` on both.
-5. Client A: `CANCEL_SEATS 1`, then `SET_RESERVATION 5`. Client B prints each.
+5. Client A: `ADJUST_FARE -50.0`, then `SET_FARE 750.0`. Show the fare changing on a
+   `QUERY_BY_ID`. Client B prints nothing — say out loud that this is expected, and
+   why (§9.2).
 6. Restart with `--semantics at-least-once --drop-reply 0.5 --seed 42`. Client A:
    `RESERVE 2`. Show the client retransmitting, the server executing twice, client B
    receiving two callbacks **with the same `eventRequestId`**, and the invariant
    assertion firing.
 7. Restart with `--semantics at-most-once --drop-reply 0.5 --seed 42`. Repeat. Show
    `DUPLICATE ... replaying stored reply`, one callback, correct final count.
-8. Repeat step 6 with `SET_RESERVATION` under at-least-once: two executions, still
-   correct. This is the idempotency result.
+8. Repeat step 6 with `SET_FARE` under at-least-once: two executions, identical final
+   fare. Then repeat with `ADJUST_FARE`: two executions, fare wrong by one delta. Run
+   them back to back — the contrast between those two is the idempotency result.
 9. Show the monitor interval expiring, `MONITOR_END` arriving, and client B reporting
    its received-versus-sent callback count.
 
@@ -1756,7 +1876,7 @@ Steps 6–8 are the graded core. Rehearse until they run without hesitation.
 | Service 2: query time/fare/seats by ID, error if absent | §4 Op 2 |
 | Service 3: reserve seats, ack, update, errors | §4 Op 3 |
 | Service 4: monitor via callback for an interval | §4 Op 4, §9 |
-| Two extra ops, one idempotent one not, described in report | §4 Ops 5–6, D9 |
+| Two extra ops, one idempotent one not, described in report | §4 Ops 5–6, D9, §22.2 |
 | Design request/reply formats, describe in report | §3, §4, D3, D4, D19 |
 | Marshal ints, floats, strings by hand; length-prefixed strings | §3.3, §11 |
 | Network byte order | §3.2 |
@@ -1770,7 +1890,7 @@ Steps 6–8 are the graded core. Rehearse until they run without hesitation.
 | Client interface with a quit option | §7.1 |
 | Print requests and replies on both sides | §6.1, §7.2 |
 | In-memory storage only | D18 |
-| Optional: client and server in different languages | D2 **[HARD PATH]** |
+| Optional: client and server in different languages | D2, §22.1 **[HARD PATH]** |
 | Demo with clients and server on different computers | §18 |
 | Report cover lists members and each member's work percentage | §24.1, §25 |
 | All source packed into one file; one submitter; no resubmission | §23, §25 |
@@ -1806,7 +1926,7 @@ Steps 6–8 are the graded core. Rehearse until they run without hesitation.
 - Requests are separated enough in time for a single-threaded server, per the brief.
   The server nonetheless polls on a timer so monitor expiry does not depend on
   traffic arriving (§6.1).
-- Flight data, bookings and reply history are memory-resident. **The at-most-once
+- Flight data and reply history are memory-resident. **The at-most-once
   guarantee covers one server process lifetime only.** A restart clears all state,
   and the report discloses this wherever it affects an experiment.
 - The route dataset is small enough that `QUERY_BY_ROUTE` may scan it linearly.
@@ -1819,59 +1939,79 @@ Steps 6–8 are the graded core. Rehearse until they run without hesitation.
 - `clientId` is client-asserted and unverified. Authentication, authorisation and
   encryption are outside the course scope (D5).
 - Callback delivery is observable but not guaranteed (D10).
-- Seats held by an exited client are never reclaimed (D22).
+- Any client may change any flight's airfare. There is no ownership or authorisation
+  model, which is a deliberate consequence of D9 and is stated in the report rather
+  than defended as realistic.
 
 Production hardening would add durable state, authenticated messages, account-based
-booking ownership, rate limiting, metrics and a congestion-aware transport. All are
+authorisation for mutating operations, rate limiting, metrics and a congestion-aware transport. All are
 deliberately excluded: they are not part of the UDP learning objectives the brief sets.
 
 ---
 
-## 22. Open decisions
+## 22. Decisions closed
 
-Three items need group agreement at M0, before feature work splits. Each is a genuine
-fork, not a detail.
+All three closed on **3 September 2026**, before feature work split. Each was a genuine
+fork rather than a detail, so each closure records what was chosen, what was rejected,
+and what would have followed from the other answer — the report needs the rejected
+branch as much as the taken one.
 
-### 22.1 Language pairing — **blocks M0**
+### 22.1 Language pairing — **CLOSED: C++17 server + Java client**
 
-| Option | Effect |
+| Option | Outcome |
 |---|---|
-| **C++17 server + Java client** *(assumed here)* | Earns the optional credit, and keeps the server work already under way. Requires one member to write the client in Java. |
-| C++17 both ends | Forfeits the optional credit. Least total work. |
-| C server + Java client | Same credit as option 1, but rebuilds a server that is already being written in C++. |
+| **C++17 server + Java client** | **Chosen.** Takes the only optional credit the brief offers, and keeps every line of the existing Java common code. |
+| C++17 both ends | Rejected. Discards the Java codec and still forfeits the credit — strictly dominated. |
+| C server + Java client | Rejected. Same credit as the choice above, but rebuilds a server already targeted at C++17. |
 
-Option 1 is the working assumption throughout this document: it is the only one that
-takes the credit without discarding work.
+The brief's wording is the whole argument: *"An additional but optional requirement is
+to implement the client and the server in different programming languages – for
+example, one in C/C++ and one in Java."* It is the only sentence in the document
+offering marks for extra work.
 
-**If the group chooses option 2**, four decisions invert, because each was decided on
-cross-language grounds that no longer apply:
+**This does not block anything now.** §16 already specifies a Java server as baseline
+and test oracle, and §17 phases the C++ server at M6, after M4 demos cleanly. Java is
+written on both ends first; the C++ server is additive. If M6 runs out of time, M5 is
+complete and submittable and forfeits only this credit.
 
-| Decision | Under option 2 |
+**For the record, had C++ been chosen on both ends**, four decisions would have
+inverted, because each was decided on cross-language grounds: D23 (uniform 4-byte
+width) reverses to packed narrow types, D6 and D15 follow it, and D21 reverses because
+the "CRC-32 names several incompatible variants" objection vanishes with one
+implementation. Part I would have needed a revision pass rather than a patch. Recorded
+so the report can show the wire format is a consequence of the language decision, not
+an independent preference.
+
+### 22.2 Which two extra operations — **CLOSED: `ADJUST_FARE` / `SET_FARE`**
+
+| Option | Outcome |
 |---|---|
-| D23 uniform 4-byte width | Reverses. Narrow types are native and free in C++, so a packed 20-byte header, `uint16` lengths and a 6-byte date become the better choice. |
-| D6 time as five `int32` | Follows D23 — pack it. |
-| D15 `uint32` string lengths | Follows D23 — `uint16`. |
-| D21 no checksum | Reverses. The objection is that "CRC-32" names several variants two implementations must match; with one implementation that risk vanishes and the malformed-datagram tests get stronger. |
+| **`ADJUST_FARE` / `SET_FARE`** | **Chosen.** No ownership model, no leak. Instantiates deck 2 slide 76's own non-idempotent example, and puts a `float32` in a request body for the first time. |
+| `CANCEL_SEATS` / `SET_RESERVATION` | Rejected. Stronger live demo — the idempotent replay would be visible on a monitoring machine — bought with a per-client booking ledger, an orphaned-seat leak, and extra reply fields. |
 
-Part I would need a revision pass, not a patch. Everything else — the fingerprint,
-the bounded event loop, the watermark, the deterministic fault rules, the operation
-semantics — is unaffected.
+Both satisfy the brief, which states only that one operation be idempotent and the
+other not, and expresses no preference. The full argument is in D9; the cost accepted
+is that fare changes fire no callbacks (§9.2), so E6's result is observed at the client
+and in the log rather than live on a third machine.
 
-### 22.2 Which two extra operations — **blocks M3**
+The decisive point: `RESERVE` is already non-idempotent and already fires callbacks, so
+the live at-least-once corruption demo survives without the ledger. What the seat pair
+uniquely added was a whole subsystem for one additional demo moment.
 
-| Option | Effect |
-|---|---|
-| **`CANCEL_SEATS` / `SET_RESERVATION`** *(assumed here)* | Corruption is visible live to a monitoring client (E8). Requires the booking ledger and accepts the leak in D22. |
-| `ADJUST_FARE` / `SET_FARE` | No ledger, no leak, less work. Corruption is invisible to the callback mechanism, weakening the demo. |
+### 22.3 Server operating system — **CLOSED: native Windows, Winsock**
 
-Both satisfy the brief. The choice is whether the stronger demonstration is worth the
-booking ledger. See D9 and D22 for the full argument.
+The C++ server targets Winsock on native Windows. Winsock and BSD sockets diverge from
+the server's first line — `WSAStartup`/`WSACleanup`, `closesocket` rather than
+`close`, `SOCKET` rather than `int` — so this could not be left open past M6.
 
-### 22.3 Server operating system — **blocks M6**
+Native Windows is chosen because the demo runs on group laptops and it puts no
+virtualisation layer between the server and the LAN. This is the weakest-grounded of
+the three closures: the brief says only *"You may work on your own laptops and use your
+laptops for demonstration"*, so it is a practical choice rather than a required one.
 
-Winsock and BSD sockets diverge from the first line of the server. Fix the demo
-machine's OS before anyone writes socket code, and see the WSL2 entry in §20 before
-choosing it.
+**Independent of this decision:** the Java server runs anywhere, and three-machine LAN
+reachability must be proven at M1 rather than on demo day. Do not demo from inside
+WSL2 — see the §20 risk entry for why its default NAT breaks the required setup.
 
 ---
 
@@ -1882,14 +2022,14 @@ These are points that look like open design questions but are answered by
 
 | Question | Answer |
 |---|---|
-| Flight fields | Fixed: identifier (integer), source and destination (variable-length strings), departure time (*"design your own data structure"*), airfare (**floating-point value**), seat availability (integer). `totalSeats` is our addition, needed for the §2.4 invariant. |
+| Flight fields | Fixed: identifier (integer), source and destination (variable-length strings), departure time (*"design your own data structure"*), airfare (**floating-point value**), seat availability (integer). `totalSeats` is our addition, held server-side as the baseline for the §2.4 oracle and never transmitted. |
 | Initial dataset | No mandatory records and no file format. Persistence is not compulsory; in-memory is the stated minimum. A version-controlled fixture is ours to choose. |
 | Operation names, opcodes, argument order | Ours. The brief fixes the four services semantically and nothing about their encoding. |
 | Fare representation | **Floating point, settled.** The brief says "the airfare (floating-point value)". Integer currency units are excluded. `float` versus `double` is ours (D16). |
 | Route matching rules and string limits | Ours. The brief says only that the places are variable-length strings and suggests length prefixes. |
 | Monitor interval bounds | Ours. The brief specifies no range. |
 | Command-line syntax | Ours. The brief requires only that the server address and port, and the semantics choice, are *passable* as arguments. Named options satisfy it. |
-| Application-level checksum | Permitted, not required — the brief is silent. Whether to carry one is D21, and it depends on §22.1. |
+| Application-level checksum | Permitted, not required — the brief is silent. D21 declines it, and that decision follows from §22.1 having closed on two languages. |
 | Submission format | **One file** containing all source. **No resubmission** — submit only the final version. One member submits for the whole group. |
 | Report cover page | Must list every member **and the percentage of work each contributed**. This is explicit in the brief and easy to overlook. |
 | Demonstration | Clients and server on **different computers**. The callback demonstration needs two clients on two machines plus the server. |
@@ -1912,7 +2052,7 @@ contract owned by the people who can review it.
 | Role | Primary deliverables | Review boundary |
 |---|---|---|
 | **A — Protocol and client** | Part I constants, codec, client command parser, request IDs, retry loop, reply/callback demultiplexing | B reviews protocol changes; C supplies test vectors |
-| **B — Server and state** | event loop, dispatcher, repository, services, booking ledger, history, subscriptions, callback generation | A reviews service-facing protocol use; C supplies scenarios |
+| **B — Server and state** | event loop, dispatcher, repository, services, reply history, subscriptions, callback generation | A reviews service-facing protocol use; C supplies scenarios |
 | **C — Integration and testing** | §14 matrix, deterministic scenario scripts, evidence capture, merge coordination, clean-machine smoke tests | owns acceptance, **not** unilateral protocol design |
 | **D — Documentation and demo** | report, this document's consistency with the code, diagrams, slides, demo narration, final packaging | validates every claim against logs from the tagged commit |
 

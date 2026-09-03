@@ -1,15 +1,14 @@
 # Client console script
 
-Every prompt and every line the client prints. Language-independent — implement this
-transcript in whichever language `decisions-to-close.md` #1 lands on.
+Every prompt and every line the client prints. Language-independent by design, though
+§22.1 has settled the client on Java.
 
 The brief requires both programs to print what they send and what they receive, so the
 console carries two interleaved streams: the **interaction** (menu, prompts, results)
 and the **protocol trace** (bracketed lines). The trace uses the field order fixed in
 `README.md` §10.2, so a client log can be read alongside the server's.
 
-Operations 5 and 6 below assume the `SET_FARE` / `ADJUST_FARE` pair. See the last
-section for the substitution if the group picks the seat pair instead.
+Operations 5 and 6 are `ADJUST_FARE` and `SET_FARE`, settled at `README.md` §22.2.
 
 ---
 
@@ -341,40 +340,3 @@ not know the server's seat count. Do not write text that implies otherwise.
 Codes 1–5 are the request being refused on its merits: the system is working and the
 answer is no. Show them where the user typed. Codes 6–12 are protocol or configuration
 faults the user cannot fix from a prompt; print them as session-level warnings.
-
----
-
-## 7. If the group picks the seat pair instead
-
-Substitute operations 5 and 6, and status code 5:
-
-```
-  5) Cancel seats            CANCEL_SEATS(flightId, n)      non-idempotent
-  6) Set my reservation      SET_RESERVATION(flightId, n)   idempotent
-```
-
-```
-choice> 5
-flight id> 1934
-seats to release> 1
-
-[SEND] req=24 op=CANCEL_SEATS attempt=1
-[RECV] req=24 status=OK
-
-Released 1 seat on flight 1934. You now hold 2. 116 available.
-```
-
-```
-choice> 6
-flight id> 1934
-set my booking to> 5
-
-[SEND] req=25 op=SET_RESERVATION attempt=1
-[RECV] req=25 status=OK
-
-You now hold 5 seats on flight 1934. 113 available.
-```
-
-Status code 5 becomes `NOT_ENOUGH_HELD` — `You do not hold that many seats on flight
-<id>.` Both replies carry the client's own holding as well as the global count, so the
-"my booking" framing that makes these operations meaningful is visible in the output.

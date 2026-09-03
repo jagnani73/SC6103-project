@@ -18,24 +18,32 @@ Code deadline **2026-10-14**. Live demo **2026-10-17**.
 
 ## Posture: the harder path is the intended path
 
-Where the brief offers a choice, this project deliberately takes the more difficult
-option to compete for the optional credit. That is a standing decision, not an
-accident, and it should not be "simplified" away.
+Where the brief offers a choice, this project takes the more difficult option **when
+the difficulty buys marks**. That is a standing decision, not an accident, and it
+should not be "simplified" away.
 
 Concretely:
 
-- **The client and server are written in different languages** (working assumption:
-  C++17 server, Java client). The brief calls this "an additional but optional
-  requirement". Both ends in one language is the baseline the brief expects.
+- **The client and server are written in different languages** — C++17 server, Java
+  client, settled at `README.md` §22.1. The brief calls this "an additional but
+  optional requirement", and it is the only sentence in the document offering marks
+  for extra work. Both ends in one language is the baseline the brief expects.
 - **The two extra operations are a matched idempotent/non-idempotent pair over the
-  same mutable state**, rather than the easier route of pairing a write against a
-  read-only query. This requires per-client seat-ownership tracking the brief does
-  not demand.
-- **Seat ownership is tracked per client**, so `CANCEL_SEATS` and `SET_RESERVATION`
-  operate on "my booking" rather than on the global pool.
+  same mutable field** — `ADJUST_FARE` and `SET_FARE` on `airfare` — rather than the
+  easier route of pairing a write against a read-only query. A read cannot corrupt
+  state, so at-least-once trivially produces the right answer and the comparison
+  demonstrates nothing.
 
-If a change would make one of these easier by abandoning the harder option, that is
-a regression. Raise it rather than doing it.
+If a change would make either of these easier by abandoning the harder option, that
+is a regression. Raise it rather than doing it.
+
+**Where the harder path was deliberately declined.** The extra operations were
+previously specified as `CANCEL_SEATS`/`SET_RESERVATION` over a per-client booking
+ledger. That was reversed at §22.2 on 3 September 2026: it earns no additional marks,
+`RESERVE` already supplies the live at-least-once corruption demo, and the ledger
+brought an orphaned-seat leak that had to be disclosed. Difficulty is worth taking
+where the brief pays for it and not otherwise — see `README.md` D9 for the argument
+and D22 for what was withdrawn.
 
 The counterweight: none of this may put the baseline at risk. Delivery is phased so
 a working system exists before the hard parts land — see "Delivery phases".
@@ -112,8 +120,8 @@ All expiry and timeout decisions use a monotonic clock, never wall-clock time.
 | 2 | `QUERY_BY_ID(flightId)` | yes |
 | 3 | `RESERVE(flightId, n)` | no |
 | 4 | `MONITOR(flightId, intervalMs)` | registration only |
-| 5 | `CANCEL_SEATS(flightId, n)` | no (required non-idempotent extra) |
-| 6 | `SET_RESERVATION(flightId, target)` | yes (required idempotent extra) |
+| 5 | `ADJUST_FARE(flightId, delta)` | no (required non-idempotent extra) |
+| 6 | `SET_FARE(flightId, newFare)` | yes (required idempotent extra) |
 
 Invocation semantics are selected by CLI flag and carried in the header. The server
 is single-threaded on the request path.
@@ -158,23 +166,25 @@ they are still cheap.
   machines, since the callback demo needs one client reserving while another
   monitors.
 
-## Open decisions
+## Decisions closed
 
-Three forks need group agreement at M0. Full argument in `README.md` §22.
+All three M0 forks were closed on 3 September 2026. Full argument in `README.md` §22.
+**Do not reopen these without a recorded reversal**, the way §22.2 was reversed.
 
-1. **Language pairing** — C++17 server + Java client (assumed), versus C++ both ends
-   (forfeits the credit), versus C server + Java client (discards existing work).
-   Choosing C++ both ends inverts D6, D15, D21 and D23.
-2. **Which two extra operations** — `CANCEL_SEATS`/`SET_RESERVATION` on seats
-   (assumed; corruption visible live to a monitoring client) versus
-   `ADJUST_FARE`/`SET_FARE` on airfare (less work, weaker demo).
-3. **Server operating system** — decides Winsock versus BSD sockets, and changes the
-   server from its first line. Note the WSL2 warning in `README.md` §20: a server
-   inside WSL2 is unreachable from other LAN machines under default networking, which
-   would break the required three-machine demo.
+1. **Language pairing** — C++17 server + Java client. Takes the brief's only optional
+   credit. Additive and phased: Java is written on both ends first, and the C++ server
+   starts at M6 only after M4 demos cleanly.
+2. **Extra operations** — `ADJUST_FARE` / `SET_FARE` on `airfare`. Reversed from the
+   earlier seat pair; see the posture section above and `README.md` D9.
+3. **Server operating system** — native Windows, Winsock. Not WSL2: its default NAT
+   makes a server inside it unreachable from other LAN machines, which would break the
+   required three-machine demo (`README.md` §20). Prove three-machine reachability at
+   M1, not on demo day.
+
+Group membership and the work split remain open, and the report cover page requires
+both.
 
 Questions that *look* open but are already answered by the brief — fare type, dataset
 format, opcode numbering, CLI syntax, submission packaging — are recorded in
 `README.md` §23. Do not reopen them.
 
-Group membership and the work split are also still open.
