@@ -839,7 +839,7 @@ public final class ConformanceTest {
         checkObj("POS isValidOpCode(1) is true",
                 Boolean.TRUE, Protocol.isValidOpCode(Protocol.OP_QUERY_BY_ROUTE));
         checkObj("POS isValidOpCode(6) is true",
-                Boolean.TRUE, Protocol.isValidOpCode(Protocol.OP_EXTRA_IDEMPOTENT));
+                Boolean.TRUE, Protocol.isValidOpCode(Protocol.OP_SET_FARE));
         checkObj("POS isValidOpCode(7) is false", Boolean.FALSE, Protocol.isValidOpCode(7));
     }
 

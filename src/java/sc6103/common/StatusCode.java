@@ -37,16 +37,21 @@ public final class StatusCode {
     public static final int ERR_INVALID_ARGUMENT = 4;
 
     /**
-     * Client asked to release more seats than its own booking holds &mdash; the
-     * per-client ledger check that makes opcode 5 operate on "my booking" rather
-     * than the global pool (README &sect;2.4).
+     * An operation 5 or 6 would leave the airfare outside {@code 0 < fare <=}
+     * {@link Protocol#MAX_FARE}. The stored value is left untouched, so a rejected
+     * {@code ADJUST_FARE} is a no-op rather than a partial application (README
+     * &sect;4 Ops 5&ndash;6).
      *
-     * <p>This meaning holds <em>only under the seat-based extra operations</em>. If
-     * the group picks the fare pair instead (README &sect;22.2,
-     * docs/decisions-to-close.md &sect;2) there is no booking to under-run and code 5 is
-     * repurposed, so do not treat the name as settled.
+     * <p>Distinct from {@link #ERR_INVALID_ARGUMENT}, which covers a delta that is NaN
+     * or infinite and is rejected at the codec before any arithmetic happens. This code
+     * means the argument was well-formed and the <em>result</em> is not allowed &mdash;
+     * a business-rule refusal, not a malformed message.
+     *
+     * <p>Code 5 previously carried {@code ERR_NOT_ENOUGH_HELD} under the seat-based
+     * extra operations withdrawn at README &sect;22.2. The number is reused rather than
+     * retired because nothing was ever implemented against the old meaning.
      */
-    public static final int ERR_NOT_ENOUGH_HELD = 5;
+    public static final int ERR_INVALID_FARE = 5;
 
     // ---- 6-12: the exchange itself is broken ----
 
@@ -137,8 +142,8 @@ public final class StatusCode {
                 return "ERR_INSUFFICIENT_SEATS";
             case ERR_INVALID_ARGUMENT:
                 return "ERR_INVALID_ARGUMENT";
-            case ERR_NOT_ENOUGH_HELD:
-                return "ERR_NOT_ENOUGH_HELD";
+            case ERR_INVALID_FARE:
+                return "ERR_INVALID_FARE";
             case ERR_MALFORMED_REQUEST:
                 return "ERR_MALFORMED_REQUEST";
             case ERR_UNKNOWN_OPCODE:

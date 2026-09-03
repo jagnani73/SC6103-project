@@ -89,26 +89,29 @@ public final class Protocol {
     public static final int OP_MONITOR = 4;
 
     /**
-     * The brief's required non-idempotent extra operation.
+     * The brief's required <b>non-idempotent</b> extra operation: add a signed
+     * {@code float32} delta to a flight's airfare (README &sect;4 Op 5).
      *
-     * <p>The <em>numbering is fixed</em> &mdash; 5 is on the wire and in the
-     * conformance vector &mdash; but <em>which operation it is remains an open group
-     * decision</em> (README &sect;22.2, docs/decisions-to-close.md &sect;2). Under the assumed
-     * seat pair it is {@code CANCEL_SEATS}; under the fare alternative it is
-     * {@code ADJUST_FARE}. The name stays neutral so that nothing hard-codes the
-     * wrong operation before the group closes the fork; rename it in one place once
-     * they do.
+     * <p>This is deck 2 slide 76's canonical non-idempotent example &mdash; "increasing
+     * a variable by 3: 2 + 3 = 5; 5 + 3 = 8; 8 + 3 = 11" &mdash; applied to a real
+     * field. A replay applies the delta twice, which is the divergence the &sect;13
+     * experiments measure.
+     *
+     * <p>Fires no callbacks: the monitor service reports seat availability only, which
+     * is the cost D9 accepts in exchange for dropping the per-client booking ledger.
      */
-    public static final int OP_EXTRA_NON_IDEMPOTENT = 5;
+    public static final int OP_ADJUST_FARE = 5;
 
     /**
-     * The brief's required idempotent extra operation. Absolute assignment, so a
-     * replay computes a zero delta and leaves state identical.
+     * The brief's required <b>idempotent</b> extra operation: set a flight's airfare to
+     * exactly the supplied value (README &sect;4 Op 6).
      *
-     * <p>Same caveat as opcode 5: the number is settled, the meaning is not
-     * ({@code SET_RESERVATION} versus {@code SET_FARE}, README &sect;22.2).
+     * <p>Absolute assignment, so a second execution writes the same value and the final
+     * state is identical. It is deliberately a <em>write</em> rather than a read-only
+     * query: a read cannot corrupt state, so at-least-once would trivially produce the
+     * right answer and experiment E6 would demonstrate nothing (D9).
      */
-    public static final int OP_EXTRA_IDEMPOTENT = 6;
+    public static final int OP_SET_FARE = 6;
 
     /**
      * Placeholder written into the {@code opCode} field of CALLBACK and MONITOR_END,
@@ -159,6 +162,23 @@ public final class Protocol {
      */
     public static final int MAX_ROUTE_RESULTS = 64;
 
+    /**
+     * Upper bound on a stored airfare. A fare must satisfy {@code 0 < fare <= MAX_FARE}
+     * after any operation 5 or 6 applies; outside that range the server returns
+     * {@link StatusCode#ERR_INVALID_FARE} and leaves the stored value untouched
+     * (README &sect;4 Ops 5&ndash;6).
+     *
+     * <p>The bound is arbitrary in magnitude and deliberate in existence: without it,
+     * "reject an out-of-range fare" is a matter of taste and the two implementations
+     * would draw the line in different places. With it, it is a boundary both sides can
+     * test against the same number.
+     *
+     * <p>Exactly representable in binary32, so a {@code SET_FARE} to this value
+     * round-trips bit-for-bit and the boundary test compares exactly rather than within
+     * a tolerance (README &sect;13).
+     */
+    public static final float MAX_FARE = 100000.0f;
+
     // ---- Reply-history watermark (README sec. 8.3, D8) ----
 
     /**
@@ -188,7 +208,7 @@ public final class Protocol {
      * step, so accepting 0 here would only let a malformed REQUEST through.
      */
     public static boolean isValidOpCode(int opCode) {
-        return opCode >= OP_QUERY_BY_ROUTE && opCode <= OP_EXTRA_IDEMPOTENT;
+        return opCode >= OP_QUERY_BY_ROUTE && opCode <= OP_SET_FARE;
     }
 
     /**
@@ -226,10 +246,10 @@ public final class Protocol {
                 return "OP_RESERVE";
             case OP_MONITOR:
                 return "OP_MONITOR";
-            case OP_EXTRA_NON_IDEMPOTENT:
-                return "OP_EXTRA_NON_IDEMPOTENT";
-            case OP_EXTRA_IDEMPOTENT:
-                return "OP_EXTRA_IDEMPOTENT";
+            case OP_ADJUST_FARE:
+                return "OP_ADJUST_FARE";
+            case OP_SET_FARE:
+                return "OP_SET_FARE";
             default:
                 return "UNKNOWN(" + opCode + ")";
         }

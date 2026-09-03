@@ -676,13 +676,20 @@ that fails if a float ever crosses the wire as text.
 
 ---
 
-## Discrepancies found
+## Discrepancies found — **all resolved**
 
 Points where these vectors could not be derived from `README.md` §3–§5 and §11 without a
-choice, or where those sections are internally incomplete. **Nothing was silently fixed.**
-Each needs a README amendment or an explicit "intentionally unspecified" note; until then
-the value in [Conventions this file fixes](#conventions-this-file-fixes) is what the
-vectors assert.
+choice, or where those sections were internally incomplete. **Nothing was silently
+fixed**, and every item below has since been written into the specification.
+
+**Status: closed on 3 September 2026.** Each entry keeps its original finding and gains a
+resolution line naming the section that now settles it. No vector byte changed — the
+README adopted what these vectors already asserted, which is the outcome this file was
+built to produce. The findings are retained rather than deleted because they are the
+evidence that building the conformance vector *before* the second implementation catches
+specification gaps while they are still cheap (README §20).
+
+A sixth item, **D-6**, was found later and is recorded at the end.
 
 <a id="d-1"></a>**D-1 · `ackUpTo` has no defined value outside REQUEST.**
 §3.4 describes it as "requests only; highest `requestId` this client has a reply for, or
@@ -691,24 +698,31 @@ vectors assert.
 otherwise disagree — C++ zero-initialising a header struct writes `0`, while a Java
 builder defaulting to the "nothing acked" sentinel writes `-1`. Both are defensible and
 they differ on the wire. These vectors use `-1`, because `0` is a legal watermark value
-("I hold the reply for requestId 0") and so cannot double as "unused". **Suggested
-amendment:** §3.4 row 28 — "requests only; `-1` in all other message types."
+("I hold the reply for requestId 0") and so cannot double as "unused".
+
+**RESOLVED.** README §3.4 row 28 now reads "−1 when the client holds no reply yet, and −1
+in every non-REQUEST message", with the C++/Java divergence spelled out beneath the
+table.
 
 <a id="d-2"></a>**D-2 · MONITOR_END's header is unspecified beyond `messageType`.**
 §4's CALLBACK subsection pins `requestId`, `opCode` and `status`; the MONITOR_END
 subsection specifies only `messageType = 3` and the two body fields. `clientId`,
 `requestId`, `opCode`, `semantics` and `status` are left open. `requestId` matters
 functionally: a client holding two monitor registrations cannot tell which one ended
-without it. These vectors mirror CALLBACK's rules. **Suggested amendment:** add a header
-line to §4 MONITOR_END — "`requestId` = the `requestId` of the MONITOR registration that
-expired, `opCode = 0`, `status = 0`", identical to CALLBACK.
+without it. These vectors mirror CALLBACK's rules.
+
+**RESOLVED.** README §4 MONITOR_END now carries a **Header** line specifying `clientId`
+and `requestId` copied from the expired registration, `opCode = 0`, `status = 0`,
+`semantics` echoed and `ackUpTo = −1`, and states why `requestId` is load-bearing.
 
 <a id="d-3"></a>**D-3 · `semantics` is not stated to be echoed in replies.**
 §3.4 defines the field and §6.1 uses it to reject a mismatched client, but no section says
 what the server writes back in a REPLY, CALLBACK or MONITOR_END. Echoing the request's
 value is the only choice that keeps a packet capture self-describing, and it is what these
-vectors assert. **Suggested amendment:** one clause in §3.4 or §6.1 — replies echo the
-request's `semantics`.
+vectors assert.
+
+**RESOLVED.** README §3.4 row 16 now reads "Echoed unchanged in REPLY, CALLBACK and
+MONITOR_END", with the reasoning stated below the table.
 
 <a id="d-4"></a>**D-4 · The §11.2 conformance record is not a message, and omits
 `totalSeats`.**
@@ -718,9 +732,12 @@ returns `departureTime`, `airfare` and `seatsAvailable`, and `QUERY_BY_ROUTE` re
 ids. So V1 is a codec exercise, not a datagram layout, and an implementer could reasonably
 read §11.2 as defining an on-the-wire `FlightRecord` that does not exist. The vector is
 reproduced here byte-for-byte as the README has it; this note is about how it is
-*labelled*, not its bytes. **Suggested amendment:** one sentence in §11.2 stating that the
-record is a marshaller anchor covering all four primitive types, is not sent by any
-operation, and deliberately omits `totalSeats`.
+*labelled*, not its bytes.
+
+**RESOLVED.** README §11.2 now opens with a paragraph stating that the record is a
+marshaller anchor rather than a datagram layout, that no operation transmits a whole
+flight record, that it exercises all four primitives with both padding cases, and that
+`totalSeats` is server-side seed state that never crosses the wire.
 
 <a id="d-5"></a>**D-5 · `QUERY_BY_ROUTE`'s reply mixes `int32 truncated` with
 `uint32 count`.**
@@ -732,6 +749,32 @@ Recorded so a reviewer does not read the mismatch as a specification error. No a
 required; §3.3's `sequence<T>` already prescribes a `uint32` count, so Op 1 is consistent
 with it and only `truncated` reads oddly beside it.
 
+**RESOLVED — no change made.** Confirmed as a non-issue and left as it stands. Recorded
+so a future reviewer does not re-raise it.
+
 **No discrepancy was found in V1.** Regenerating §11.2's record field by field from §2.1,
 §2.2 and §3.3 reproduces the README's 60 bytes exactly, including the `899.5f` bit pattern
 `0x4460E000` and both pad counts (3 after `"Singapore"`, 2 after `"London"`).
+
+---
+
+<a id="d-6"></a>**D-6 · `ackUpTo` was never required to sit below its own `requestId`.**
+Found after the five above, while tracing the at-most-once path rather than the byte
+layout — so it is a protocol gap, not a vector gap, and no fixture here changes.
+
+§6.1 prunes the reply history on receipt, *before* the duplicate lookup. That ordering is
+only correct while a request's watermark stays strictly below the identifier it rides on.
+For a correct client it does: §7.2 raises `ackUpTo` only after a reply arrives, by which
+point `requestId` has already advanced past it. For a buggy client it does not, and a
+request carrying `ackUpTo == requestId` makes the server delete the very entry that
+request's own retransmission will need. Every retransmission is then treated as new and
+at-most-once degrades to at-least-once — silently, under exactly the loss conditions the
+mechanism exists to handle.
+
+Same class of failure as D24's reused `requestId`, and the same answer: the guarantee
+exists for the case where something has already gone wrong, so the invariant it rests on
+is checked rather than assumed.
+
+**RESOLVED.** README §8.3 states it as "Hard constraint 2 — watermark ordering", §6.1
+rejects a violation with `ERR_INVALID_ARGUMENT` before pruning, and §6.1's load-bearing
+list grew from five properties to six.
