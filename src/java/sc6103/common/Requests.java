@@ -8,10 +8,11 @@ package sc6103.common;
  * known before {@code payloadLen} can be filled in - encode the body first, then the
  * header in front of it.
  *
- * <p>These live in {@code common} rather than in the client because README sec. 16
- * shares this package between the Java client and the Java server. The C++ server
- * carries its own independent copy written against README Part I, never against this
- * file.
+ * <p>These live in {@code common} because the Java side may grow further tooling that
+ * needs them - a test harness, a trace decoder - and the wire types belong with the
+ * codec rather than inside the console client. The C++ server, which is the only server
+ * (README sec. 22.1), carries its own independent copy written against README Part I and
+ * never sees this file.
  *
  * <p><b>There are no type tags on the wire</b> (README sec. 3.3). The layout is derived
  * from {@code opCode} alone, so a decoder must already know which nested type it is

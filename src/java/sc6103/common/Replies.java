@@ -4,8 +4,9 @@ package sc6103.common;
  * Reply, callback and monitor-end bodies for README sec. 4.
  *
  * <p>The counterpart to {@link Requests}: what comes back after the 40-byte
- * {@link Header}. Shared between the Java client and the Java server (README sec. 16);
- * the C++ server carries its own copy written against Part I.
+ * {@link Header}. The C++ server is the only server (README sec. 22.1) and carries its
+ * own copy written against Part I, so these two files and that one are held together by
+ * nothing but the specification and the vectors in {@code tests/conformance/}.
  *
  * <p><b>An error reply has no body at all</b> (README sec. 5, D4). Status lives in the
  * header, so a caller must check {@link StatusCode#isOk(int)} <em>before</em> attempting

@@ -28,6 +28,10 @@ Concretely:
   client, settled at `README.md` §22.1. The brief calls this "an additional but
   optional requirement", and it is the only sentence in the document offering marks
   for extra work. Both ends in one language is the baseline the brief expects.
+  **The C++ server is the only server.** The earlier plan to write a Java server
+  first, as a baseline and a test oracle, was dropped on 3 September 2026: all four
+  members already believed the project was one server and one client, and a shared
+  model across four people beats a fallback nobody was counting on.
 - **The two extra operations are a matched idempotent/non-idempotent pair over the
   same mutable field** — `ADJUST_FARE` and `SET_FARE` on `airfare` — rather than the
   easier route of pairing a write against a read-only query. A read cannot corrupt
@@ -45,8 +49,10 @@ brought an orphaned-seat leak that had to be disclosed. Difficulty is worth taki
 where the brief pays for it and not otherwise — see `README.md` D9 for the argument
 and D22 for what was withdrawn.
 
-The counterweight: none of this may put the baseline at risk. Delivery is phased so
-a working system exists before the hard parts land — see "Delivery phases".
+**There is no counterweight left.** Nothing is being built twice, so an unfinished
+C++ server is not a forfeited optional credit; it is a project with nothing to
+demonstrate. That risk is the price of the decision and it is accepted knowingly.
+See "Delivery" for how the work is ordered around it.
 
 ## Hard constraints
 
@@ -79,6 +85,12 @@ this file is the short form.
   UDP            sockets
 ```
 
+That stack is built twice, in two languages that share no code: the Java client under
+`src/java/sc6103/`, and the C++17 server. The server is written against Part I of
+`README.md` and the vectors in `tests/conformance/vectors.md`, never by reading the
+Java source. Each side is tested against the vectors, never against the other's
+output.
+
 **Every field in every message is exactly 4 bytes, big-endian.** No `uint8`, no
 `uint16`, anywhere, including the header. Java has no unsigned types, so uniform
 width is what keeps two independent implementations honest. This rule is
@@ -100,8 +112,8 @@ Fixed 40-byte header:
 ```
 
 A request is identified by **(clientId, requestId)** — not by network address. That
-pair keys both the reply history and the booking ledger. The observed source
-endpoint is used only to address callbacks.
+pair keys the reply history. The observed source endpoint is used only to address
+callbacks.
 
 Two rules that are easy to violate and expensive to debug:
 
@@ -128,13 +140,32 @@ is single-threaded on the request path.
 
 ## Delivery
 
-Milestones M0–M8 are in `README.md` §17. The ordering rule: **M6 (the cross-language
-server) does not start before M4 demos cleanly.** If M6 runs out of time, M5 is a
-complete and submittable project that forfeits only the optional credit.
+The milestone table is in `README.md` §17. Four rules shape it, and they hold
+whatever the table says:
 
-The conformance vector (`README.md` §11.2) is built at M6 *before* the second
-implementation, not after — it is what catches alignment and endianness faults while
-they are still cheap.
+- **One server, no fallback.** Nothing is written twice, so there is no partial
+  system to submit and nothing to demo if the C++ server is unfinished. Order the
+  work so a thin end-to-end path runs early and grows, never so the pieces meet for
+  the first time near the deadline.
+- **The Java client is the test driver.** It is finished, and it is the real client,
+  not a harness. Every C++ milestone is proved by pointing it at the server and
+  reading both logs. A server that only passes its own unit tests has been tested
+  against the assumptions that wrote it.
+- **The conformance vector is the contract.** With no single-language system to diff
+  against, `tests/conformance/vectors.md` and `README.md` §11 are the only alignment
+  mechanism there is. Write the C++ marshaller against the vectors and pass them
+  before any socket code exists: an endianness or alignment fault costs minutes there
+  and a day over UDP.
+- **Prove three-machine reachability early.** Server bind, client traffic and
+  callback delivery across three physical machines, on the network the demo will use.
+  A blocking firewall or a NAT is cheap to work around now and fatal on demo morning
+  (`README.md` §20).
+
+Where things stand: the specification is complete, all three decisions below are
+closed, the shared marshalling layer passes 222 conformance assertions, and the Java
+console client is finished from the console UI down through the retry engine, monitor
+session and UDP channel. The C++ server, the experiments and the report have not been
+started.
 
 ## Working on this repo
 
@@ -147,8 +178,10 @@ they are still cheap.
 - In Java, mask every byte read with `& 0xFF`, and validate decoded lengths are
   non-negative and in range before allocating.
 - Check remaining buffer length before every cursor read, on both sides.
-- Adding an operation touches: the opcode table above, `README.md` §4, the
-  marshaller on both sides, the server dispatcher, and the client menu.
+- Adding an operation touches: the opcode table above, `README.md` §4,
+  `src/java/sc6103/common/Protocol.java` and the body codecs beside it, the menu in
+  `src/java/sc6103/client/ConsoleUi.java`, a vector in `tests/conformance/vectors.md`,
+  and the C++ server's marshaller and dispatcher.
 - Comments are graded. Non-obvious protocol decisions get a comment explaining the
   *why*, with a lecture-slide or decision-record reference.
 - Do not reach for a library to solve a problem the brief wants solved by hand. If
@@ -168,18 +201,19 @@ they are still cheap.
 
 ## Decisions closed
 
-All three M0 forks were closed on 3 September 2026. Full argument in `README.md` §22.
+All three forks were closed on 3 September 2026. Full argument in `README.md` §22.
 **Do not reopen these without a recorded reversal**, the way §22.2 was reversed.
 
-1. **Language pairing** — C++17 server + Java client. Takes the brief's only optional
-   credit. Additive and phased: Java is written on both ends first, and the C++ server
-   starts at M6 only after M4 demos cleanly.
+1. **Language pairing** — C++17 server + Java client, with no Java server. Takes the
+   brief's only optional credit. The C++ server is not an additive phase layered on a
+   single-language system; it is the entire server side, and nothing exists to fall
+   back to if it slips.
 2. **Extra operations** — `ADJUST_FARE` / `SET_FARE` on `airfare`. Reversed from the
    earlier seat pair; see the posture section above and `README.md` D9.
 3. **Server operating system** — native Windows, Winsock. Not WSL2: its default NAT
    makes a server inside it unreachable from other LAN machines, which would break the
-   required three-machine demo (`README.md` §20). Prove three-machine reachability at
-   M1, not on demo day.
+   required three-machine demo (`README.md` §20). Prove three-machine reachability
+   early, not on demo day.
 
 Group membership and the work split remain open, and the report cover page requires
 both.

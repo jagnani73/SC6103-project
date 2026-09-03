@@ -7,9 +7,16 @@ byte-level marshalling, timeouts and retransmission, duplicate filtering, reply
 histories, and server-to-client callbacks. No RPC framework is used; implementing
 that layer is the assignment.
 
-**Status:** design frozen. All three M0 forks closed on 3 September 2026 — see
-[§22 Decisions closed](#22-decisions-closed). The shared marshalling layer and its
-conformance suite are implemented; client and server are not started.
+**Status:** design frozen; all three M0 forks closed on 3 September 2026 (§22).
+
+| | |
+|---|---|
+| **Done** | Java marshalling layer, 222 passing conformance assertions, complete Java console client |
+| **Next** | the C++17 server — §17 M2 |
+| **Not started** | server, experiments, report |
+
+**There is one server, written in C++17, and no fallback implementation.** §22.1 records
+that decision and what it costs. Read it before planning work.
 
 ### How this document is organised
 
@@ -93,19 +100,25 @@ no database.
 The two middle layers are what the project asks students to build and what the
 brief forbids obtaining from a framework.
 
-**[HARD PATH]** The server and client are written in **different languages** —
-**C++17 server, Java client**, settled at §22.1. → D2
+**[HARD PATH]** The server and client are written in **different languages** — a C++17
+server and a Java client, settled at §22.1. There is no second server in either language:
+the C++ implementation is the only one, and nothing checks it except this specification,
+the §11.2 vectors and a client written independently from both. → D2
 
 ### Component responsibilities
 
-| Component | Responsibility |
-|---|---|
-| Console client | Parses commands; blocks during a monitor interval; prints replies, errors, callbacks and timeout status |
-| Client reliability layer | Owns `(clientId, requestId)`, applies timeout/retry policy, accepts only matching replies |
-| Binary codec | Marshals and unmarshals headers and bodies with strict bounds and byte-order conversion |
-| Server dispatcher | Validates magic/version, selects the operation, applies duplicate policy, builds the status reply |
-| Flight services | Query, reserve, monitor, and the two fare-mutation business rules |
-| State managers | Flight repository, reply history, monitor registry, loss-simulator config |
+| Component | Side | Responsibility |
+|---|---|---|
+| Console client | Java | Parses commands; blocks during a monitor interval; prints replies, errors, callbacks and timeout status |
+| Client reliability layer | Java | Owns `(clientId, requestId)`, applies timeout/retry policy, accepts only matching replies |
+| Binary codec | **both, twice** | Marshals and unmarshals headers and bodies with strict bounds and byte-order conversion. Written independently on each side from §3 — never shared, never ported |
+| Server dispatcher | C++ | Validates magic/version, selects the operation, applies duplicate policy, builds the status reply |
+| Flight services | C++ | Query, reserve, monitor, and the two fare-mutation business rules |
+| State managers | C++ | Flight repository, reply history, monitor registry, loss-simulator config |
+
+Everything below the console and above the socket exists **twice**, once per language,
+and the two copies are held together by Part I and the §11.2 vectors alone. That is the
+cost §22.1 accepts and the reason §11's rules are normative rather than advisory.
 
 ---
 
@@ -998,18 +1011,27 @@ C++17.
 
 **Alternatives rejected.**
 
-- *Both ends in C++.* The brief's baseline. Forfeits the only optional credit on
-  offer, and hides marshalling bugs as above.
-- *Both ends in Java.* Same forfeiture, and discards the server work already under way.
+- *Both ends in C++, or both ends in Java.* The brief's baseline. Forfeits the only
+  optional credit on offer, and hides marshalling bugs as above.
 - *C rather than C++ on the server.* Equivalent on the wire, since §11 forbids the
-  language features that would differ. C++17 is chosen because it is what the server
-  work targets; nothing in this specification depends on the choice.
+  language features that would differ. C++17 is chosen because it is what the server work
+  targets; nothing in this specification depends on the choice.
 - *C++ client, Java server.* Same credit, worse logistics: it needs a working C++
-  toolchain and a successful build on two separate client machines on demo day.
+  toolchain and a successful build on two separate client machines on demo day, where the
+  chosen direction needs one prepared server machine and a JVM on the rest.
+- *Keeping a Java server alongside the C++ one*, as oracle and fallback. This was the
+  plan until 3 September 2026 and §22.1 records why it was dropped: the group already
+  understood the project to have one server, and a specification four people read
+  differently is worse than a specification with a thinner safety net.
 
-**Risk and mitigation.** Cross-language integration can fail late. Mitigated by the
-phasing in §17: a single-language system is built first and retained as both fallback
-demo and test oracle.
+**Risk and mitigation.** Cross-language integration can fail late, and with no fallback
+that failure now ends the project rather than costing a bonus. Three things absorb it,
+all in §17's phasing: the §11.2 conformance vectors are encoded in C++ **before** any
+server logic, so layout faults surface against a hex dump rather than a live demo; the
+finished Java client drives every C++ milestone, so the server is answering an
+independent reading of Part I from its first operation onward; and M2 proves the build,
+the sockets and the three-machine network path in week one, when each is still cheap to
+fix.
 
 ---
 
@@ -1707,8 +1729,9 @@ produces.
 | reliability | **T13** client and server started in different modes → `ERR_SEMANTICS_MISMATCH`, no state change |
 | reliability | **T15** monitor expiry on a fully idle server → registration removed and `MONITOR_END` sent with no request traffic whatsoever |
 | reliability | **T12** state change, then server restart → initial dataset restored; report states the process-lifetime boundary |
-| integration | full operation set against a single-language server |
-| integration | Java client against the C++ server, all operations, diffed against the single-language server |
+| integration | §11.2 vectors encoded in C++ and hex-compared against the Java output, **before any server logic is written** |
+| integration | Java client against the C++ server, all six operations, every status code reachable at least once |
+| integration | Java client's own decoders exercised against real C++ replies — a body that decodes in Java but was encoded in C++ is the only proof the two agree |
 | system | **T06** concurrent monitoring: two clients register for one flight, a third reserves; both receive the same seat count and `callbackSeq` before expiry, neither after |
 | system | three-machine callback demo |
 | system | all experiments in §13 |
@@ -1718,9 +1741,23 @@ with the server receiving no datagrams at all for the duration of the interval �
 version that sweeps expired monitors only on request arrival passes every other test
 here and fails this one.
 
-The single-language server exists as the oracle for the second integration row. Any
-difference between the two servers for the same request is a bug in the cross-language
-implementation, and the diff localises it immediately.
+**There is no reference implementation to diff against.** §22.1 removed the Java server,
+so nothing here compares two servers' answers to the same request. Three things replace
+that comparison, and the test plan leans on all three rather than on any one:
+
+- **The conformance vectors**, run in C++ before the server exists. They check the codec
+  byte for byte against a fixed hex dump, which is a stronger check than agreement between
+  two implementations that might share a misreading.
+- **The Java client's own decoders.** It was written months before the server and refuses
+  anything malformed, so a reply the client accepts is a reply that satisfies an
+  independent reading of Part I. Every integration run is therefore also a protocol audit.
+- **The §2.4 expected-value oracle**, which gives each experiment an automatic pass or
+  fail without needing a second server to ask.
+
+What none of these covers is server *behaviour* under duplication — history eviction,
+fingerprint conflicts, callback sequencing. Those are checked only by T10, T13, T15 and
+the E-series, which is why those tests carry more weight here than they would in a project
+with a fallback implementation.
 
 ---
 
@@ -1728,19 +1765,29 @@ implementation, and the diff localises it immediately.
 
 ### 15.1 Building
 
-Java, no build tool — plain `javac` keeps the submission a clean archive with no
-dependency manifest:
+Two independent builds, sharing nothing. Neither uses a build tool or a third-party
+dependency, which keeps the submission a clean single archive with no manifest to
+reconstruct.
+
+**Java client** — plain `javac`, or the wrapper scripts, which also run the conformance
+suite:
 
 ```
-javac -d out $(find src/java -name '*.java')
+scripts/build.ps1                         # Windows
+scripts/build.sh                          # Linux/macOS
+javac -d build/classes $(find src/java -name '*.java')    # equivalent, by hand
 ```
 
-C++:
+**C++ server** — Winsock on native Windows (§22.3):
 
 ```
+make PLATFORM=windows     # links ws2_32
 make                      # Linux/macOS: c++ -std=c++17 -Wall -Wextra -O2
-make PLATFORM=windows     # links ws2_32 for Winsock
 ```
+
+The C++ target keeps a POSIX path because a developer may build and unit-test the codec
+on Linux, but **the demo server runs on native Windows** and that is the configuration
+§17's M2 requires proven from a second physical machine.
 
 ### 15.2 Running
 
@@ -1786,44 +1833,60 @@ not a loopback address.
 ## 16. Repository layout
 
 ```
-docs/                     course brief
+docs/                     course brief, console script
 src/
   java/
-    common/               marshalling, protocol constants, header codec
-    client/               console UI, request/reply state machine
-    server/               Java server — baseline and test oracle
+    sc6103/common/        marshalling, protocol constants, header and body codecs
+    sc6103/client/        console UI, request/reply state machine, monitor session
   cpp/
-    server/               C++17 server — the graded cross-language implementation
+    server/               C++17 server - the only server
 tests/
-  conformance/            §11.2 hex vector, both languages
+  conformance/            §11.2 hex vectors, encoded by both implementations
+  java/                   Java-side conformance harness
   experiments/            §13 harness and result logs
 scripts/                  build and demo helpers
 ```
 
-`src/java/common` is shared between the Java client and Java server. It is **not**
-shared with the C++ server, which is the point: that implementation is written against
-Part I, not against the Java code.
+**There is one server and it is written in C++17.** There is no Java server, no
+reference implementation, and no fallback. §22.1 records why.
+
+`src/java/common` and the C++ server share **no code, no headers and no generated
+artefacts**. That is the entire point of §22.1: two implementations written independently
+from Part I check each other's assumptions in a way one implementation cannot. It also
+means the specification and the conformance vectors are the only things holding them
+together, so a change to either is a change to the interface between two people's work.
 
 ---
 
 ## 17. Delivery milestones
 
-The optional credit must not endanger the baseline, so a demonstrable system exists
-before the difficult part begins. **M6 does not start before M4 demos cleanly. If M6
-runs out of time, M5 is a complete and submittable project** — it forfeits the
-optional credit and nothing else.
+The plan has one hard property: **the Java client is finished first and is the test
+driver for every C++ milestone.** Each stage below is exercised by running the real
+client against the server being built, not by a harness written alongside it. A server
+that satisfies a test written by its own author proves less than one that answers a
+client written months earlier from the same specification.
+
+The corresponding hard risk: there is no fallback. Every milestone from M2 on is on the
+critical path, and slipping M7 means demonstrating an incomplete system rather than a
+complete one that forfeits a bonus. §20 carries the mitigations.
 
 | | Milestone | Deliverables | Exit criterion |
 |---|---|---|---|
-| M0 | Protocol freeze | Part I agreed; §22 decisions closed; shared constants written | every member can read one request's byte layout aloud; no field ambiguity remains |
-| M1 | Buildable skeleton | build targets, socket bind, receive loop, one stub operation | fresh clone builds on two machines; one datagram round-trips and is logged |
-| M2 | Vertical slice | `QUERY_BY_ID` end to end, one invalid-input path, codec unit tests | `main` demonstrates encode → UDP → decode → dispatch → reply → render |
-| M3 | Core services | all six operations, the §2.4 expected-value oracle, functional tests | operations pass their §14 boundary tests at zero loss |
-| M4 | Reliability semantics | retry loop, both semantics, fingerprints, deterministic drop rules | T10, T13 and experiments E1–E7 pass, with logs that visibly distinguish the modes |
-| M5 | Monitoring | `MONITOR`, callbacks, `callbackSeq`, idle expiry, `MONITOR_END` | T06, T11 and T15 pass with two monitoring clients |
-| M6 | Cross-language server | conformance vector (§11.2) in both languages, then the second implementation | both produce identical bytes; the Java client passes §14 integration diffed against the single-language server |
-| M7 | Hardening and multi-host | malformed-input tests, restart disclosure, firewall checks, clean-machine build | full §14 matrix passes or documented exceptions are agreed |
-| M8 | Final package | tagged commit, packed source file, report, demo rehearsal | every document matches the tagged code; rehearsal completes in the allotted time |
+| M0 | Protocol freeze | Part I agreed; §22 decisions closed; shared constants written | ✅ every field's byte layout is unambiguous; D-1…D-6 folded into Part I |
+| M1 | Java client and vectors | codec, header, bodies, §11.2 vectors, full console client | ✅ 222 conformance assertions pass; all six operations drive end to end |
+| M2 | C++ skeleton on the demo host | build target, Winsock socket bind, bounded receive loop, header decode, one operation | the Java client's `QUERY_BY_ID` round-trips from **a second physical machine**; §11.2 vectors encode byte-identically in C++ |
+| M3 | C++ core services | all six operations, seeded table, §2.4 expected-value oracle | the client's §14 boundary tests pass at zero loss, driven from the console |
+| M4 | C++ reliability semantics | reply history, fingerprints, `ackUpTo` pruning, both semantics, `ERR_SEMANTICS_MISMATCH` | T10, T13 pass; a retransmission visibly replays a cached reply instead of re-executing |
+| M5 | C++ monitoring | registry, callbacks, `callbackSeq`, bounded expiry, `MONITOR_END` | T06 and T15 pass with two monitoring clients on two machines |
+| M6 | Fault injection and experiments | server-side drop gates, `--seed`, one-shot rules, E1–E10 | every experiment produces its predicted result, with logs captured per §24.3 |
+| M7 | Hardening and multi-host | malformed-input tests, firewall checks, clean-machine build, rehearsal | full §14 matrix passes or documented exceptions are agreed |
+| M8 | Final package | tagged commit, packed source file, report | every document matches the tagged code; rehearsal completes in the allotted time |
+
+**M2 is the milestone that de-risks the project**, and it is deliberately larger than a
+"hello world" would be. It forces the Winsock decision, the build, the byte-level
+conformance check and the three-machine network path to all be proven in week one, while
+each is still cheap to fix. Every one of those is capable of ending the project on demo
+day, and none of them gets easier by being discovered later.
 
 ### Definition of done
 
@@ -1902,10 +1965,11 @@ Steps 6–8 are the graded core. Rehearse until they run without hesitation.
 | Risk | Impact | Mitigation |
 |---|---|---|
 | **Server run under WSL2 is unreachable from other machines** | **three-machine demo fails on the day** | WSL2 NATs by default, so a LAN peer cannot reach a server inside it. Either set `networkingMode=mirrored` in `.wslconfig` and verify from a second machine, or run the server on native Linux or native Windows. Test this at M1, not at M8. |
-| Late integration of separately written code | high — the classic group-project failure | integrate daily; `main` always builds; M2 vertical slice before feature work splits; no exchanging archives |
+| Late integration of separately written code | high — the classic group-project failure | integrate daily; `main` always builds; no exchanging archives. The Java client is already finished and on `main`, so C++ work integrates against something real from its first commit |
 | Protocol drift between the two implementations | high | Part I frozen at M0; changes only by a review that both implementers sign off; conformance vector as a golden test |
-| Cross-language server not finished in time | loses the optional credit | phased delivery (§17); M5 is submittable alone |
-| Cross-language byte mismatch found late | integration stalls | conformance vector built at M6 *before* the second implementation |
+| **C++ server not finished in time** | **project fails — there is no fallback** (§22.1) | M2 proves build, sockets and the three-machine path in week one; each later milestone is independently demonstrable, so an unfinished M6 still leaves a working M5 system to show; the Java client drives every stage so the server is never integrated late |
+| No reference implementation to diff a suspect reply against | medium — cross-language faults are slower to localise | §11.2 vectors encoded in C++ before any server logic; the Java client's own decoders reject anything malformed, so every integration run doubles as a protocol audit (§14) |
+| Cross-language byte mismatch found late | integration stalls | §11.2 vectors are encoded in C++ at M2, before any server logic, so a layout fault fails against a hex dump rather than during a live run |
 | Winsock/BSD divergence on the demo machine | server will not build on the day | fix the server OS at M0; it changes the server from its first line |
 | Firewall blocks UDP between laptops | demo fails | test the three-machine path early on the network the demo will use |
 | Client/server semantics mismatch during experiments | results look valid but mean nothing | `semantics` header field, rejected on mismatch (D19) |
@@ -1956,31 +2020,61 @@ fork rather than a detail, so each closure records what was chosen, what was rej
 and what would have followed from the other answer — the report needs the rejected
 branch as much as the taken one.
 
-### 22.1 Language pairing — **CLOSED: C++17 server + Java client**
+### 22.1 Language pairing — **CLOSED: C++17 server, Java client, one server only**
 
 | Option | Outcome |
 |---|---|
-| **C++17 server + Java client** | **Chosen.** Takes the only optional credit the brief offers, and keeps every line of the existing Java common code. |
-| C++17 both ends | Rejected. Discards the Java codec and still forfeits the credit — strictly dominated. |
-| C server + Java client | Rejected. Same credit as the choice above, but rebuilds a server already targeted at C++17. |
+| **C++17 server + Java client, no Java server** | **Chosen.** Takes the brief's optional credit, and gives the group one server to build rather than two. |
+| C++17 server + Java client, Java server retained as oracle and fallback | Rejected on 3 September 2026, having been the working plan. See below. |
+| C++17 or Java on both ends | Rejected. Forfeits the only optional credit the brief offers, for no saving the option above does not already give. |
 
-The brief's wording is the whole argument: *"An additional but optional requirement is
-to implement the client and the server in different programming languages – for
-example, one in C/C++ and one in Java."* It is the only sentence in the document
-offering marks for extra work.
+The brief's wording carries the first half: *"An additional but optional requirement is
+to implement the client and the server in different programming languages – for example,
+one in C/C++ and one in Java."* It is the only sentence in the document offering marks
+for extra work, and Java client plus C++ server takes it.
 
-**This does not block anything now.** §16 already specifies a Java server as baseline
-and test oracle, and §17 phases the C++ server at M6, after M4 demos cleanly. Java is
-written on both ends first; the C++ server is additive. If M6 runs out of time, M5 is
-complete and submittable and forfeits only this credit.
+**The second half — dropping the Java server — was a reversal.** The earlier plan built a
+Java server first, as three things at once: a test oracle to diff the C++ server against,
+a fallback if C++ ran out of time, and a way to debug the at-most-once logic in the easier
+language before porting it.
 
-**For the record, had C++ been chosen on both ends**, four decisions would have
-inverted, because each was decided on cross-language grounds: D23 (uniform 4-byte
+It was dropped because the whole group already believed there was only ever one server.
+A specification that four people read differently is worse than a specification with a
+weaker safety net, and the cost of the correction was rising with every day of work
+written against the wrong assumption.
+
+**What that costs, stated plainly rather than softened:**
+
+- **There is no fallback.** If the C++ server is not finished, there is no working system
+  to submit — not a reduced one. This converts every C++ risk from "loses the optional
+  credit" to "fails the project", and §20 is rewritten accordingly.
+- **There is no oracle.** §14's integration row previously diffed the C++ server against a
+  Java one. That comparison is gone. The conformance vectors of §11.2 replace part of it —
+  they check the *codec* byte for byte — but nothing now independently checks server
+  *behaviour*: history eviction, fingerprint conflicts, callback sequencing.
+- **The at-most-once logic gets written once, in the harder language**, without a working
+  version to compare against.
+
+**What absorbs the risk instead:**
+
+- **The Java client is finished, and it is the test driver.** Every C++ milestone in §17 is
+  exercised by the real client rather than by a harness the server's own author wrote. A
+  server that satisfies its author's test proves less than one that answers a client
+  written independently from the same specification.
+- **M2 front-loads every project-ending risk.** Winsock, the build, the byte-level
+  conformance check and the three-machine network path are all proven in week one, when
+  each is still cheap.
+- **The conformance vectors are now the contract.** §11.2 is checked in C++ before the
+  server logic is written, so an endianness or alignment fault surfaces against a hex dump
+  rather than against a live demo.
+
+**For the record, had a single language been chosen for both ends**, four decisions would
+have inverted, because each was decided on cross-language grounds: D23 (uniform 4-byte
 width) reverses to packed narrow types, D6 and D15 follow it, and D21 reverses because
 the "CRC-32 names several incompatible variants" objection vanishes with one
 implementation. Part I would have needed a revision pass rather than a patch. Recorded
-so the report can show the wire format is a consequence of the language decision, not
-an independent preference.
+so the report can show the wire format is a consequence of the language decision rather
+than an independent preference.
 
 ### 22.2 Which two extra operations — **CLOSED: `ADJUST_FARE` / `SET_FARE`**
 
@@ -2001,17 +2095,21 @@ uniquely added was a whole subsystem for one additional demo moment.
 ### 22.3 Server operating system — **CLOSED: native Windows, Winsock**
 
 The C++ server targets Winsock on native Windows. Winsock and BSD sockets diverge from
-the server's first line — `WSAStartup`/`WSACleanup`, `closesocket` rather than
-`close`, `SOCKET` rather than `int` — so this could not be left open past M6.
+the server's first line — `WSAStartup`/`WSACleanup`, `closesocket` rather than `close`,
+`SOCKET` rather than `int` — so this had to be settled before any socket code was
+written.
 
 Native Windows is chosen because the demo runs on group laptops and it puts no
-virtualisation layer between the server and the LAN. This is the weakest-grounded of
-the three closures: the brief says only *"You may work on your own laptops and use your
+virtualisation layer between the server and the LAN. This is the weakest-grounded of the
+three closures: the brief says only *"You may work on your own laptops and use your
 laptops for demonstration"*, so it is a practical choice rather than a required one.
 
-**Independent of this decision:** the Java server runs anywhere, and three-machine LAN
-reachability must be proven at M1 rather than on demo day. Do not demo from inside
-WSL2 — see the §20 risk entry for why its default NAT breaks the required setup.
+**This decision now carries more weight than it did.** With no Java server, the socket
+layer has no second implementation to fall back on and no machine-independent
+alternative: whatever this choice implies is what the demo runs on. Prove three-machine
+reachability at **M2**, on the network the demo will use, before any operation beyond the
+first is written. Do not demo from inside WSL2 — see the §20 entry for why its default
+NAT makes a server unreachable from other LAN machines.
 
 ---
 
@@ -2051,8 +2149,8 @@ contract owned by the people who can review it.
 
 | Role | Primary deliverables | Review boundary |
 |---|---|---|
-| **A — Protocol and client** | Part I constants, codec, client command parser, request IDs, retry loop, reply/callback demultiplexing | B reviews protocol changes; C supplies test vectors |
-| **B — Server and state** | event loop, dispatcher, repository, services, reply history, subscriptions, callback generation | A reviews service-facing protocol use; C supplies scenarios |
+| **A — Protocol and client** | Part I constants, Java codec, console client, request IDs, retry loop, reply/callback demultiplexing, conformance vectors | B reviews protocol changes; C supplies test scenarios |
+| **B — C++ server** | the whole server: Winsock layer, C++ codec written from Part I, event loop, dispatcher, repository, services, reply history, subscriptions, callback generation, fault injection | A reviews protocol use but **must not** hand over Java source as a reference — §22.1's value depends on the two implementations being independent |
 | **C — Integration and testing** | §14 matrix, deterministic scenario scripts, evidence capture, merge coordination, clean-machine smoke tests | owns acceptance, **not** unilateral protocol design |
 | **D — Documentation and demo** | report, this document's consistency with the code, diagrams, slides, demo narration, final packaging | validates every claim against logs from the tagged commit |
 
