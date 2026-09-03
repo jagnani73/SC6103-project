@@ -226,30 +226,37 @@ public final class Protocol {
     }
 
     /**
-     * Constant name for an opcode, for the request/reply logging both sides are
-     * required to produce.
+     * Log name for an opcode, for the request/reply trace both sides are required to
+     * produce.
+     *
+     * <p>Returns the bare operation name &mdash; {@code "RESERVE"}, not the Java constant
+     * {@code "OP_RESERVE"}. README &sect;10.2's log schema fixes the vocabulary by example
+     * and writes the bare form, and that example is what the C++ server is written
+     * against; it carries its own independent copy of this table and never sees this
+     * file. A trace is only readable side by side across three machines if both
+     * implementations spell the opcode identically, so the spec's word wins over Java's.
      *
      * <p>An unrecognised value is rendered rather than rejected, because the log line
      * for a bad datagram is exactly where its opcode needs to be readable.
      *
-     * @return the constant's name, or {@code "UNKNOWN(n)"} for any other value
+     * @return the operation name, or {@code "UNKNOWN(n)"} for any other value
      */
     public static String opCodeName(int opCode) {
         switch (opCode) {
             case OP_NONE:
-                return "OP_NONE";
+                return "NONE";
             case OP_QUERY_BY_ROUTE:
-                return "OP_QUERY_BY_ROUTE";
+                return "QUERY_BY_ROUTE";
             case OP_QUERY_BY_ID:
-                return "OP_QUERY_BY_ID";
+                return "QUERY_BY_ID";
             case OP_RESERVE:
-                return "OP_RESERVE";
+                return "RESERVE";
             case OP_MONITOR:
-                return "OP_MONITOR";
+                return "MONITOR";
             case OP_ADJUST_FARE:
-                return "OP_ADJUST_FARE";
+                return "ADJUST_FARE";
             case OP_SET_FARE:
-                return "OP_SET_FARE";
+                return "SET_FARE";
             default:
                 return "UNKNOWN(" + opCode + ")";
         }

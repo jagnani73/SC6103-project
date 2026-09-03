@@ -26,6 +26,7 @@ SC6103 Flight Information Client
   semantics   at-most-once
   timeout     750 ms, 3 retries
   loss        request 0.00  reply 0.00
+  rules       none
   seed        42
 --------------------------------------------------------------
 ```
@@ -74,7 +75,7 @@ choice> 1
 source> Singapore
 destination> London
 
-[SEND] req=17 op=OP_QUERY_BY_ROUTE attempt=1
+[SEND] req=17 op=QUERY_BY_ROUTE attempt=1
 [RECV] req=17 status=OK
 
 3 flights, Singapore to London
@@ -104,7 +105,7 @@ Showing the first 64 matches. More exist.
 choice> 2
 flight id> 1934
 
-[SEND] req=19 op=OP_QUERY_BY_ID attempt=1
+[SEND] req=19 op=QUERY_BY_ID attempt=1
 [RECV] req=19 status=OK
 
 Flight 1934
@@ -125,7 +126,7 @@ choice> 3
 flight id> 1934
 seats> 2
 
-[SEND] req=21 op=OP_RESERVE attempt=1
+[SEND] req=21 op=RESERVE attempt=1
 [RECV] req=21 status=OK
 
 Reserved 2 seats on flight 1934. 115 now available.
@@ -152,7 +153,7 @@ choice> 4
 flight id> 1934
 interval (seconds)> 60
 
-[SEND] req=23 op=OP_MONITOR attempt=1
+[SEND] req=23 op=MONITOR attempt=1
 [RECV] req=23 status=OK
 
 Monitoring flight 1934 for 60s. 115 seats at registration.
@@ -166,7 +167,7 @@ choice> 5
 flight id> 1934
 change by> -50.00
 
-[SEND] req=24 op=OP_ADJUST_FARE attempt=1
+[SEND] req=24 op=ADJUST_FARE attempt=1
 [RECV] req=24 status=OK
 
 Fare for flight 1934 changed by -50.00, now 900.00.
@@ -187,7 +188,7 @@ choice> 6
 flight id> 1934
 new fare> 950.00
 
-[SEND] req=26 op=OP_SET_FARE attempt=1
+[SEND] req=26 op=SET_FARE attempt=1
 [RECV] req=26 status=OK
 
 Fare for flight 1934 is now 950.00.
@@ -212,7 +213,7 @@ The trace must make the reuse visible, because it is what lets the server recogn
 duplicate at all.
 
 ```
-[SEND]  req=27 op=OP_RESERVE attempt=1
+[SEND]  req=27 op=RESERVE attempt=1
 [TIMEOUT] req=27 attempt=1 after 750ms
 [RETRY] req=27 attempt=2 identical bytes
 [RECV]  req=27 status=OK decision=cache-replay
@@ -236,7 +237,7 @@ Reserved 2 seats on flight 1934. 111 now available.
 Exhaustion:
 
 ```
-[SEND]  req=28 op=OP_RESERVE attempt=1
+[SEND]  req=28 op=RESERVE attempt=1
 [TIMEOUT] req=28 attempt=1 after 750ms
 [RETRY] req=28 attempt=2 identical bytes
 [TIMEOUT] req=28 attempt=2 after 750ms
