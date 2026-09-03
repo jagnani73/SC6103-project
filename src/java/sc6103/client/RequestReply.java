@@ -256,6 +256,19 @@ public final class RequestReply {
                 continue;
             }
 
+            // README sec. 3.4 requires the server to echo the request's semantics
+            // unchanged. Checking it is the whole reason the field is echoed rather than
+            // zeroed: without this the client learns about a mode disagreement only when
+            // the server bothers to refuse, and a server that serves a mismatched client
+            // anyway would produce experimental results that look valid and mean nothing
+            // (D19). A mismatch here means the peer is broken or is not running this
+            // protocol version's rules, so it is reported and never silently accepted.
+            if (in.header.semantics != config.semantics) {
+                trace.warn("server echoed semantics " + in.header.semantics
+                        + " on req=" + requestId + ", this client sent " + config.semantics
+                        + " - results from this session are not trustworthy");
+            }
+
             // Raise the watermark only now, and only to this request's own id, keeping the
             // strict inequality the next call asserts.
             if (requestId > ackUpTo) {
