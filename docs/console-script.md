@@ -49,8 +49,8 @@ Redrawn after every completed operation.
   2) Show flight details
   3) Reserve seats
   4) Monitor seat availability
-  5) Set fare
-  6) Adjust fare
+  5) Adjust fare
+  6) Set fare
   0) Quit
 
 choice>
@@ -74,7 +74,7 @@ choice> 1
 source> Singapore
 destination> London
 
-[SEND] req=17 op=FIND_ROUTE attempt=1
+[SEND] req=17 op=OP_QUERY_BY_ROUTE attempt=1
 [RECV] req=17 status=OK
 
 3 flights, Singapore to London
@@ -88,7 +88,7 @@ destination> London
 Empty result is an error, not an empty list:
 
 ```
-[RECV] req=18 status=NO_ROUTE_MATCH
+[RECV] req=18 status=ERR_NO_ROUTE_MATCH
 No flights from Singapore to Reykjavik.
 ```
 
@@ -104,7 +104,7 @@ Showing the first 64 matches. More exist.
 choice> 2
 flight id> 1934
 
-[SEND] req=19 op=GET_FLIGHT attempt=1
+[SEND] req=19 op=OP_QUERY_BY_ID attempt=1
 [RECV] req=19 status=OK
 
 Flight 1934
@@ -114,7 +114,7 @@ Flight 1934
 ```
 
 ```
-[RECV] req=20 status=UNKNOWN_FLIGHT
+[RECV] req=20 status=ERR_UNKNOWN_FLIGHT
 No flight with ID 9999.
 ```
 
@@ -125,14 +125,14 @@ choice> 3
 flight id> 1934
 seats> 2
 
-[SEND] req=21 op=RESERVE attempt=1
+[SEND] req=21 op=OP_RESERVE attempt=1
 [RECV] req=21 status=OK
 
 Reserved 2 seats on flight 1934. 115 now available.
 ```
 
 ```
-[RECV] req=22 status=INSUFFICIENT_SEATS
+[RECV] req=22 status=ERR_INSUFFICIENT_SEATS
 Not enough seats available on flight 1934.
 ```
 
@@ -152,49 +152,49 @@ choice> 4
 flight id> 1934
 interval (seconds)> 60
 
-[SEND] req=23 op=MONITOR attempt=1
+[SEND] req=23 op=OP_MONITOR attempt=1
 [RECV] req=23 status=OK
 
 Monitoring flight 1934 for 60s. 115 seats at registration.
 Input is blocked until the interval ends.
 ```
 
-### 5 — Set fare (idempotent)
+### 5 — Adjust fare (non-idempotent)
 
 ```
 choice> 5
 flight id> 1934
+change by> -50.00
+
+[SEND] req=24 op=OP_ADJUST_FARE attempt=1
+[RECV] req=24 status=OK
+
+Fare for flight 1934 changed by -50.00, now 900.00.
+```
+
+```
+[RECV] req=25 status=ERR_INVALID_FARE
+The resulting fare must be above 0 and at most 100000.00. Flight 1934 is unchanged.
+```
+
+Print the delta, not just the result. Under at-least-once with a lost reply the
+operation runs twice, and a user who sees only the final figure cannot tell.
+
+### 6 — Set fare (idempotent)
+
+```
+choice> 6
+flight id> 1934
 new fare> 950.00
 
-[SEND] req=24 op=SET_FARE attempt=1
-[RECV] req=24 status=OK
+[SEND] req=26 op=OP_SET_FARE attempt=1
+[RECV] req=26 status=OK
 
 Fare for flight 1934 is now 950.00.
 ```
 
 Running the identical request again prints the identical result. That is the point of
 the operation and it is worth showing during the demo.
-
-### 6 — Adjust fare (non-idempotent)
-
-```
-choice> 6
-flight id> 1934
-change by> -50.00
-
-[SEND] req=25 op=ADJUST_FARE attempt=1
-[RECV] req=25 status=OK
-
-Fare for flight 1934 changed by -50.00, now 900.00.
-```
-
-```
-[RECV] req=26 status=NEGATIVE_FARE
-That change would make the fare negative. Flight 1934 unchanged.
-```
-
-Print the delta, not just the result. Under at-least-once with a lost reply the
-operation runs twice, and a user who sees only the final figure cannot tell.
 
 ### 0 — Quit
 
@@ -212,7 +212,7 @@ The trace must make the reuse visible, because it is what lets the server recogn
 duplicate at all.
 
 ```
-[SEND]  req=27 op=RESERVE attempt=1
+[SEND]  req=27 op=OP_RESERVE attempt=1
 [TIMEOUT] req=27 attempt=1 after 750ms
 [RETRY] req=27 attempt=2 identical bytes
 [RECV]  req=27 status=OK decision=cache-replay
@@ -236,7 +236,7 @@ Reserved 2 seats on flight 1934. 111 now available.
 Exhaustion:
 
 ```
-[SEND]  req=28 op=RESERVE attempt=1
+[SEND]  req=28 op=OP_RESERVE attempt=1
 [TIMEOUT] req=28 attempt=1 after 750ms
 [RETRY] req=28 attempt=2 identical bytes
 [TIMEOUT] req=28 attempt=2 after 750ms
@@ -324,18 +324,18 @@ not know the server's seat count. Do not write text that implies otherwise.
 | Code | Shown to the user |
 |---|---|
 | 0 `OK` | no message — print the result |
-| 1 `UNKNOWN_FLIGHT` | `No flight with ID <id>.` |
-| 2 `NO_ROUTE_MATCH` | `No flights from <src> to <dst>.` |
-| 3 `INSUFFICIENT_SEATS` | `Not enough seats available on flight <id>.` |
-| 4 `INVALID_ARGUMENT` | `The server rejected an argument in that request.` |
-| 5 `NEGATIVE_FARE` | `That change would make the fare negative. Flight <id> unchanged.` |
-| 6 `MALFORMED_REQUEST` | `Protocol error: the server could not parse that request.` |
-| 7 `UNKNOWN_OPCODE` | `Protocol error: the server does not support that operation.` |
-| 8 `MONITOR_TABLE_FULL` | `The server cannot accept more monitors right now. Try again shortly.` |
-| 9 `SERVER_ERROR` | `The server reported an internal error. Check the server log.` |
-| 10 `VERSION_MISMATCH` | `Protocol version mismatch. Client and server builds differ.` |
-| 11 `SEMANTICS_MISMATCH` | `Semantics mismatch. Restart both with the same --semantics.` |
-| 12 `REQUEST_ID_CONFLICT` | `Request ID collision. This is a client bug — report it.` |
+| 1 `ERR_UNKNOWN_FLIGHT` | `No flight with ID <id>.` |
+| 2 `ERR_NO_ROUTE_MATCH` | `No flights from <src> to <dst>.` |
+| 3 `ERR_INSUFFICIENT_SEATS` | `Not enough seats available on flight <id>.` |
+| 4 `ERR_INVALID_ARGUMENT` | `The server rejected an argument in that request.` |
+| 5 `ERR_INVALID_FARE` | `The resulting fare must be above 0 and at most <max>. Flight <id> is unchanged.` |
+| 6 `ERR_MALFORMED_REQUEST` | `Protocol error: the server could not parse that request.` |
+| 7 `ERR_UNKNOWN_OPCODE` | `Protocol error: the server does not support that operation.` |
+| 8 `ERR_MONITOR_TABLE_FULL` | `The server cannot accept more monitors right now. Try again shortly.` |
+| 9 `ERR_SERVER_ERROR` | `The server reported an internal error. Check the server log.` |
+| 10 `ERR_VERSION_MISMATCH` | `Protocol version mismatch. Client and server builds differ.` |
+| 11 `ERR_SEMANTICS_MISMATCH` | `Semantics mismatch. Restart both with the same --semantics.` |
+| 12 `ERR_REQUEST_ID_CONFLICT` | `Request ID collision. This is a client bug — report it.` |
 
 Codes 1–5 are the request being refused on its merits: the system is working and the
 answer is no. Show them where the user typed. Codes 6–12 are protocol or configuration
