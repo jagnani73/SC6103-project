@@ -59,7 +59,17 @@ public final class Requests {
             // the class of fault the conformance vector V3 exists to catch.
             final String src = in.getString();
             final String dst = in.getString();
-            return new Route(src, dst);
+            try {
+                return new Route(src, dst);
+            } catch (IllegalArgumentException e) {
+                // requireName is an unchecked check because it also guards our own
+                // construction, but on this path the value came off the wire. Left to
+                // propagate it would unwind out of the server's receive loop and end the
+                // process, which README sec. 3.6 step 7 forbids - the server must still
+                // be serving after a bad datagram.
+                throw new CodecException("QUERY_BY_ROUTE: " + e.getMessage(),
+                        StatusCode.ERR_INVALID_ARGUMENT);
+            }
         }
 
         /**
@@ -149,7 +159,8 @@ public final class Requests {
                 // A decoded value, unlike a constructed one, is untrusted input: report
                 // it as a wire fault so the dispatcher answers ERR_INVALID_ARGUMENT
                 // rather than throwing an unchecked exception out of the request loop.
-                throw new CodecException("RESERVE numSeats " + n + " must be >= 1");
+                throw new CodecException("RESERVE numSeats " + n + " must be >= 1",
+                        StatusCode.ERR_INVALID_ARGUMENT);
             }
             return new Reserve(id, n);
         }
@@ -201,7 +212,8 @@ public final class Requests {
             final int ms = in.getInt32();
             if (ms < 1 || ms > MAX_INTERVAL_MS) {
                 throw new CodecException("MONITOR intervalMs " + ms
-                        + " outside 1.." + MAX_INTERVAL_MS);
+                        + " outside 1.." + MAX_INTERVAL_MS,
+                        StatusCode.ERR_INVALID_ARGUMENT);
             }
             return new Monitor(id, ms);
         }
@@ -293,10 +305,16 @@ public final class Requests {
 
         public static SetFare read(Codec in) throws CodecException {
             final int id = in.getInt32();
+            // getFloat32 has already refused NaN and both infinities, and those are
+            // ERR_INVALID_ARGUMENT: the argument is unusable rather than merely refused.
             final float f = in.getFloat32();
             if (!isLegalFare(f)) {
+                // A well-formed request the server declines on its merits. README sec. 4
+                // Op 6 gives it its own code and guarantees the stored value is left
+                // alone, which is a different thing to say than "that did not parse".
                 throw new CodecException("SET_FARE newFare " + f
-                        + " outside (0, " + Protocol.MAX_FARE + "]");
+                        + " outside (0, " + Protocol.MAX_FARE + "]",
+                        StatusCode.ERR_INVALID_FARE);
             }
             return new SetFare(id, f);
         }
