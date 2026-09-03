@@ -189,7 +189,7 @@ public final class RequestReply {
             if (loss.shouldDropRequest()) {
                 // Suppressed after encoding, before the send, so the codec ran on exactly
                 // the path it would have on a transmitted datagram (README sec. 10).
-                trace.drop(requestId, opCode, "request", loss.lastReason());
+                trace.drop(requestId, opCode, attempt, "request", loss.lastReason());
             } else {
                 trace.send(requestId, opCode, attempt, "transmitted");
                 channel.send(txBuf, length);
@@ -252,7 +252,7 @@ public final class RequestReply {
             if (loss.shouldDropReply()) {
                 // Client-side reply loss, applied after receipt. The operation genuinely
                 // ran on the server; this models the return path vanishing.
-                trace.drop(requestId, opCode, "reply", loss.lastReason());
+                trace.drop(requestId, opCode, attempt, "reply", loss.lastReason());
                 continue;
             }
 

@@ -249,9 +249,12 @@ public final class TraceLog {
      * the path it would have run on had the datagram been sent - which is the
      * whole point of injecting in-process rather than with an external tool (D12).
      *
-     * <p>README sec. 10 also asks for the attempt number on a suppression line.
-     * This method does not take one; the {@code SEND} or {@code RETRY} line for
-     * the same {@code requestId} immediately above it supplies that column.
+     * <p>The attempt number is carried here rather than inferred from the
+     * neighbouring {@code SEND} or {@code RETRY} line. README sec. 10 requires it on
+     * every suppressed message, and inference breaks in the case that matters most:
+     * when a request is dropped there is no {@code SEND} line above it at all, because
+     * nothing was transmitted. A trace of an all-dropped run would otherwise carry no
+     * attempt column anywhere.
      *
      * @param dir    {@code "request"} or {@code "reply"} - the client has exactly
      *               those two gates ({@code --drop-request},
@@ -262,9 +265,9 @@ public final class TraceLog {
      *               for a one-shot rule or {@code "bernoulli"} for the seeded
      *               probability gate (README sec. 10.1)
      */
-    public void drop(int requestId, int opCode, String dir, String reason) {
+    public void drop(int requestId, int opCode, int attempt, String dir, String reason) {
         emit("DROP", dir, Integer.toString(requestId), Protocol.opCodeName(opCode),
-                NONE, reason, NONE);
+                Integer.toString(attempt), reason, NONE);
     }
 
     /**
