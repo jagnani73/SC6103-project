@@ -161,11 +161,13 @@ whatever the table says:
   A blocking firewall or a NAT is cheap to work around now and fatal on demo morning
   (`README.md` §20).
 
-Where things stand: the specification is complete, all three decisions below are
-closed, the shared marshalling layer passes 222 conformance assertions, and the Java
-console client is finished from the console UI down through the retry engine, monitor
-session and UDP channel. The C++ server, the experiments and the report have not been
-started.
+Where things stand: the specification and both implementations are complete. The Java
+console client is finished from the UI through the retry engine and UDP channel; the
+C++17 server implements all six operations, both invocation semantics, monitoring and
+fault injection. The automated suites currently pass 332 checks and the E1-E10 harness
+passes all ten experiment groups. A report draft exists. The remaining acceptance work
+is physical: fill the report cover, prove three-machine reachability on the demo network,
+capture final evidence, and rehearse the live demonstration.
 
 ## Working on this repo
 
