@@ -251,8 +251,9 @@ public final class ConsoleUi {
             // The session times itself from its own monotonic clock. The server's
             // expiresInMs is not passed in as the deadline: it was computed before the
             // reply crossed a lossy link, and D20 makes the local deadline authoritative.
-            new MonitorSession(flightId, body.intervalMs, r.seatsAvailable, trace, out)
-                    .run(engine);
+            // One retry timeout of grace lets a MONITOR_END sent at expiry still arrive.
+            new MonitorSession(flightId, body.intervalMs, r.seatsAvailable,
+                    config.timeoutMs, trace, out).run(engine);
         } catch (CodecException e) {
             malformedReply(e);
             out.println();

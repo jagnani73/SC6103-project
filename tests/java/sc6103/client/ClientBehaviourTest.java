@@ -56,6 +56,7 @@ public final class ClientBehaviourTest {
         run("ACK-watermark", ClientBehaviourTest::ackUpToStaysBelowRequestId);
         run("MONITOR-gaps", ClientBehaviourTest::monitorReportsGapsAndRepeats);
         run("MONITOR-noend", ClientBehaviourTest::monitorEndsOnLocalTimer);
+        run("MONITOR-lateend", ClientBehaviourTest::monitorAcceptsLateEnd);
 
         System.out.println();
         System.out.println("----------------------------------------------------------");
@@ -361,7 +362,8 @@ public final class ClientBehaviourTest {
             final Replies.Monitor m = Replies.Monitor.read(reg.body);
             final ByteArrayOutputStream captured = new ByteArrayOutputStream();
             final PrintStream ui = new PrintStream(captured, true, StandardCharsets.UTF_8);
-            new MonitorSession(1934, 900, m.seatsAvailable, f.trace, ui).run(f.engine);
+            new MonitorSession(1934, 900, m.seatsAvailable, f.config.timeoutMs, f.trace, ui)
+                    .run(f.engine);
 
             final String text = captured.toString(StandardCharsets.UTF_8);
             checkObj("reports the missing seq=2",
@@ -370,6 +372,48 @@ public final class ClientBehaviourTest {
                     Boolean.TRUE, text.contains("executed req42 twice"));
             checkObj("reconciles 2 of 3 against MONITOR_END",
                     Boolean.TRUE, text.contains("2 of 3 updates received"));
+        }
+    }
+
+    /**
+     * A MONITOR_END that lands just after the local deadline is still used to reconcile.
+     *
+     * <p>The server sends MONITOR_END from its expiry sweep, a few milliseconds after the
+     * interval both sides are timing. With no grace window the client's own deadline won
+     * that race in 4 of 10 lossless loopback sessions and reported an understated count.
+     */
+    private static void monitorAcceptsLateEnd() throws Exception {
+        try (Fixture f = new Fixture(2, 400, 1)) {
+            final long cid = f.engine.clientId();
+            final int sem = f.config.semantics;
+            f.peer.then((request, body, peer) -> {
+                      peer.reply(request, StatusCode.OK, c -> {
+                          c.putInt32(120);
+                          c.putInt32(300);
+                      });
+                      Thread.sleep(30);
+                      peer.callback(cid, request.requestId, sem, 1934, 118, 42, 1);
+                      // About 360 ms after the reply: past the client's 300 ms deadline and
+                      // well inside its 400 ms grace window.
+                      Thread.sleep(330);
+                      peer.monitorEnd(cid, request.requestId, sem, 1934, 1);
+                  }).start();
+
+            final RequestReply.Outcome reg = f.engine.call(Protocol.OP_MONITOR,
+                    new Requests.Monitor(1934, 300)::write);
+            checkObj("registration succeeded", Boolean.FALSE, reg.timedOut);
+            final Replies.Monitor m = Replies.Monitor.read(reg.body);
+
+            final ByteArrayOutputStream captured = new ByteArrayOutputStream();
+            final PrintStream ui = new PrintStream(captured, true, StandardCharsets.UTF_8);
+            new MonitorSession(1934, 300, m.seatsAvailable, f.config.timeoutMs, f.trace, ui)
+                    .run(f.engine);
+
+            final String text = captured.toString(StandardCharsets.UTF_8);
+            checkObj("reconciles 1 of 1 against the late MONITOR_END",
+                    Boolean.TRUE, text.contains("1 of 1 updates received"));
+            checkObj("did not fall back to the local timer",
+                    Boolean.FALSE, text.contains("Monitor ended on local timer"));
         }
     }
 
@@ -403,7 +447,8 @@ public final class ClientBehaviourTest {
             final ByteArrayOutputStream captured = new ByteArrayOutputStream();
             final PrintStream ui = new PrintStream(captured, true, StandardCharsets.UTF_8);
             final long before = System.nanoTime();
-            new MonitorSession(1934, 300, m.seatsAvailable, f.trace, ui).run(f.engine);
+            new MonitorSession(1934, 300, m.seatsAvailable, f.config.timeoutMs, f.trace, ui)
+                    .run(f.engine);
             final long elapsedMs = (System.nanoTime() - before) / 1_000_000L;
 
             final String text = captured.toString(StandardCharsets.UTF_8);
@@ -411,8 +456,12 @@ public final class ClientBehaviourTest {
                     Boolean.TRUE, text.contains("Monitor ended on local timer"));
             checkObj("admits the count may be understated",
                     Boolean.TRUE, text.contains("may be understated"));
-            checkObj("waited out its own interval rather than returning early",
-                    Boolean.TRUE, elapsedMs >= 250);
+            checkObj("waited out the interval and the 400 ms grace window",
+                    Boolean.TRUE, elapsedMs >= 650);
+            // The grace window is bounded, so a MONITOR_END that never comes cannot hold
+            // the client indefinitely (D20).
+            checkObj("gave up soon after the grace window",
+                    Boolean.TRUE, elapsedMs < 1500);
         }
     }
 

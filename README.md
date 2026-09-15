@@ -669,9 +669,10 @@ Three details are load-bearing:
 
 After a successful `MONITOR` reply the client blocks until its local monotonic
 deadline, printing each callback and reporting gaps in `callbackSeq`. It accepts no
-user input during this period. On expiry — or on receiving `MONITOR_END`, whichever
-comes first — it prints a summary: callbacks received, callbacks missed, and any
-`eventRequestId` seen more than once.
+user input during this period. It prints a summary when `MONITOR_END` arrives, or when
+the deadline plus a grace window of one retry timeout has passed, whichever comes
+first: callbacks received, callbacks missed, and any `eventRequestId` seen more than
+once. During the grace window the client listens only for `MONITOR_END`. → D20
 
 ---
 
@@ -1521,6 +1522,16 @@ from a qualitative observation into experiment E10's measurement.
 
 Treating it as advisory is the correct framing: `MONITOR_END` can itself be lost, so a
 client that waited for it rather than its own clock would hang.
+
+The client does wait a little past its own deadline, though. Both programs time the same
+interval from nearly the same instant, and the server sends `MONITOR_END` from its expiry
+sweep, which runs a few milliseconds after the nominal expiry. With no allowance, the
+client's deadline won that race in 4 of 10 lossless loopback sessions during the
+15 September 2026 verification, and each of those sessions warned that its lost-update
+count might be understated when nothing had been lost. The client therefore keeps
+listening for `MONITOR_END` alone for one retry timeout after its deadline. The wait is
+still bounded, so a `MONITOR_END` that really is lost delays the summary by at most that
+timeout.
 
 **Alternative rejected.** *Reliable end-of-monitor notification.* Same objection as
 reliable callbacks (D10): a retransmission state machine in the wrong direction for a

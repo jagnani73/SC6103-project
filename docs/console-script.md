@@ -298,8 +298,9 @@ Three rules:
 - **Reconcile against `MONITOR_END`.** Its `final-seq` gives the true total, so the
   client can say *3 of 4* rather than only reporting gaps it happened to notice between
   updates that did arrive.
-- **The local deadline is authoritative.** `MONITOR_END` can itself be lost. If it never
-  arrives, end on the timer and say so:
+- **The local deadline bounds the wait.** `MONITOR_END` can itself be lost. The server
+  sends it a few milliseconds after expiry, so the client keeps listening for one retry
+  timeout past its deadline. If it still has not arrived, end on the timer and say so:
 
 ```
 Monitor ended on local timer. MONITOR_END not received;

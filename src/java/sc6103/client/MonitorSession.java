@@ -46,6 +46,20 @@ public final class MonitorSession implements RequestReply.AsyncHandler {
     private final int flightId;
     private final int intervalMs;
     private final int baselineSeats;
+
+    /**
+     * How long past the local deadline the session keeps listening for MONITOR_END alone.
+     *
+     * <p>Client and server time the same interval from almost the same instant, and the
+     * server only sends MONITOR_END from its expiry sweep, which on Windows lands a few
+     * milliseconds after the nominal expiry. Without a grace window the client's own
+     * deadline wins that race often: 4 of 10 lossless loopback sessions ended on the local
+     * timer during the 2026-09-15 verification, reporting an understated count for no
+     * reason. The window is bounded, so a MONITOR_END that is genuinely lost still cannot
+     * hold the client (D20).
+     */
+    private final int endGraceMs;
+
     private final TraceLog trace;
     private final PrintStream out;
 
@@ -67,11 +81,16 @@ public final class MonitorSession implements RequestReply.AsyncHandler {
     /** Server's final count, or -1 if MONITOR_END never arrived. */
     private int finalSeq = -1;
 
-    public MonitorSession(int flightId, int intervalMs, int baselineSeats,
+    /**
+     * @param endGraceMs how long past the local deadline to keep waiting for MONITOR_END;
+     *                   the console passes the retry timeout. 0 disables the window
+     */
+    public MonitorSession(int flightId, int intervalMs, int baselineSeats, int endGraceMs,
                           TraceLog trace, PrintStream out) {
         this.flightId = flightId;
         this.intervalMs = intervalMs;
         this.baselineSeats = baselineSeats;
+        this.endGraceMs = endGraceMs;
         this.trace = trace;
         this.out = out;
     }
@@ -80,10 +99,11 @@ public final class MonitorSession implements RequestReply.AsyncHandler {
      * Blocks for the interval, printing updates, then prints the reconciliation summary.
      *
      * <p><b>The deadline is computed here, from the client's own monotonic clock, and it
-     * is authoritative.</b> The server's {@code expiresInMs} is display only: it was
+     * bounds the wait.</b> The server's {@code expiresInMs} is display only: it was
      * computed before the reply travelled over a lossy link, and MONITOR_END may never
-     * arrive at all. A client that ended on the server's word rather than its own would
-     * hang exactly when the network is worst (D20, README sec. 7.3).
+     * arrive at all. The session ends when MONITOR_END arrives or when the local deadline
+     * plus {@link #endGraceMs} has passed, whichever is first. A lost MONITOR_END therefore
+     * costs at most the grace window and can never hang the client (D20, README sec. 7.3).
      */
     public void run(RequestReply engine) throws IOException {
         out.printf("Monitoring flight %d for %ds. %d seats at registration.%n",
@@ -96,7 +116,13 @@ public final class MonitorSession implements RequestReply.AsyncHandler {
         final RequestReply.AsyncHandler previous = null; // monitor mode owns the socket
         engine.setAsyncHandler(this);
         try {
-            final boolean endedByServer = engine.pumpUntil(deadline, () -> finalSeq >= 0);
+            boolean endedByServer = engine.pumpUntil(deadline, () -> finalSeq >= 0);
+            if (!endedByServer && endGraceMs > 0) {
+                // The interval is over and the server owes no further update. Listen only
+                // for the MONITOR_END that is most likely already in flight (endGraceMs).
+                final long graceDeadline = deadline + TimeUnit.MILLISECONDS.toNanos(endGraceMs);
+                endedByServer = engine.pumpUntil(graceDeadline, () -> finalSeq >= 0);
+            }
             printSummary(endedByServer);
         } finally {
             // Leaving the handler installed would send stray callbacks from an expired
