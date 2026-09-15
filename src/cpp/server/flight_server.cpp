@@ -90,12 +90,23 @@ std::string timestamp() {
     return out.str();
 }
 
+// clientId is printed as 0x%08X because that is how the Java client prints it in its
+// banner and on every trace line. README sec. 10.2 fixes the field order so logs from
+// three machines can be read side by side, which fails if one side prints the same
+// uint32 in decimal.
+std::string client_text(std::uint32_t client_id) {
+    std::ostringstream out;
+    out << "0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(8)
+        << client_id;
+    return out.str();
+}
+
 void log_line(const char* event, const char* direction, std::uint32_t client_id,
               std::int32_t request_id, std::int32_t opcode,
               const std::string& decision, const std::string& state = "-") {
     std::cout << timestamp() << " SERVER " << std::left << std::setw(10) << event
               << ' ' << std::setw(9) << direction
-              << " client=" << client_id
+              << " client=" << client_text(client_id)
               << " req=" << request_id
               << " opcode=" << opcode_name(opcode)
               << " attempt=- decision=" << decision
@@ -578,7 +589,7 @@ private:
         if (status == OK && request.opcode == OP_RESERVE) {
             fire_callbacks(mutated_flight, request.request_id);
         }
-        if (mutated_flight != 0) assert_expected_state(mutated_flight);
+        if (mutated_flight != 0) assert_expected_state(request, mutated_flight);
     }
 
     // The brief requires the server to print every request it receives and every reply it
@@ -916,14 +927,18 @@ private:
         return true;
     }
 
-    void assert_expected_state(std::int32_t flight_id) {
+    // Carries the request that caused the mutation, so a divergence line names the
+    // client, request and operation that produced it (README sec. 10.2 forbids lines that
+    // cannot be correlated).
+    void assert_expected_state(const Header& request, std::int32_t flight_id) {
         Flight* flight = find_flight(flight_id);
         if (flight == nullptr) return;
         const bool seats_ok = flight->seats == flight->expected_seats;
         const bool fare_ok = std::memcmp(&flight->fare, &flight->expected_fare,
                                          sizeof(float)) == 0;
-        log_line((seats_ok && fare_ok) ? "ORACLE_OK" : "ORACLE_ERROR", "state", 0, 0,
-                 OP_NONE, (seats_ok && fare_ok) ? "matches" : "diverged",
+        log_line((seats_ok && fare_ok) ? "ORACLE_OK" : "ORACLE_ERROR", "state",
+                 request.client_id, request.request_id, request.opcode,
+                 (seats_ok && fare_ok) ? "matches" : "diverged",
                  "flight=" + std::to_string(flight_id)
                  + " seats=" + std::to_string(flight->seats)
                  + "/" + std::to_string(flight->expected_seats)

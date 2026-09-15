@@ -67,6 +67,9 @@ inline bool legal_fare(float value) {
 
 inline const char* opcode_name(std::int32_t value) {
     switch (value) {
+        // CALLBACK, MONITOR_END and history evictions carry no operation. "NONE" is the
+        // word the Java client logs for the same placeholder, so the two logs line up.
+        case OP_NONE: return "NONE";
         case OP_QUERY_BY_ROUTE: return "QUERY_BY_ROUTE";
         case OP_QUERY_BY_ID: return "QUERY_BY_ID";
         case OP_RESERVE: return "RESERVE";
