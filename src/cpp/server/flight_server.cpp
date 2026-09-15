@@ -577,10 +577,12 @@ private:
             return;
         }
         if (config_.semantics == SEM_AT_MOST_ONCE) {
-            store_history(request.client_id, request.request_id, request_fingerprint,
-                          reply.data(), reply_length);
+            const std::size_t client_entries = store_history(
+                request.client_id, request.request_id, request_fingerprint,
+                reply.data(), reply_length);
             log_line("CACHE", "reply", request.client_id, request.request_id,
-                     request.opcode, "stored-before-send");
+                     request.opcode, "stored-before-send",
+                     "client-entries=" + std::to_string(client_entries));
         }
         send_reply_bytes(reply.data(), reply_length, request, from);
 
@@ -873,9 +875,13 @@ private:
         }
     }
 
-    void store_history(std::uint32_t client_id, std::int32_t request_id,
-                       std::uint64_t request_fingerprint, const std::uint8_t* bytes,
-                       std::size_t length) {
+    // Returns how many entries this client holds after the store. The CACHE line prints it,
+    // which is how experiment E9 measures history growth with and without ackUpTo
+    // (README sec. 8.3, sec. 13). Every entry displaced to make room is logged, because
+    // README sec. 10.2 lists history eviction among the events the server must print.
+    std::size_t store_history(std::uint32_t client_id, std::int32_t request_id,
+                              std::uint64_t request_fingerprint, const std::uint8_t* bytes,
+                              std::size_t length) {
         HistoryEntry* slot = nullptr;
         std::size_t client_count = 0;
         HistoryEntry* oldest_client = nullptr;
@@ -894,9 +900,18 @@ private:
                 }
             }
         }
-        if (client_count >= MAX_HISTORY_PER_CLIENT) slot = oldest_client;
-        else if (slot == nullptr) slot = oldest_global;
-        if (slot == nullptr) return;
+        if (client_count >= MAX_HISTORY_PER_CLIENT) {
+            slot = oldest_client;
+            log_line("EVICT", "reply", slot->client_id, slot->request_id, OP_NONE,
+                     "per-client-cap");
+            --client_count;
+        } else if (slot == nullptr && oldest_global != nullptr) {
+            slot = oldest_global;
+            log_line("EVICT", "reply", slot->client_id, slot->request_id, OP_NONE,
+                     "table-full");
+            if (slot->client_id == client_id) --client_count;
+        }
+        if (slot == nullptr) return client_count;
         slot->used = true;
         slot->client_id = client_id;
         slot->request_id = request_id;
@@ -905,6 +920,7 @@ private:
         std::copy(bytes, bytes + length, slot->reply.begin());
         slot->stored_at = Clock::now();
         slot->order = ++history_order_;
+        return client_count + 1;
     }
 
     bool mark_first_event(std::uint32_t client_id, std::int32_t request_id) {
