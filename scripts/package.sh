@@ -14,9 +14,17 @@ fi
 
 mkdir -p "$DIST"
 cd "$ROOT"
-zip -q -r "$ARCHIVE" .gitignore CLAUDE.md Makefile README.md docs scripts src tests
+# Relative to ROOT from here on: a native Windows zip.exe reached from Git Bash cannot
+# open the /d/... form of an absolute path, and a relative one works everywhere.
+RELATIVE_ARCHIVE="dist/SC6103-project-source.zip"
+# zip -r adds to an existing archive, so a stale file would survive a rebuild.
+rm -f "$RELATIVE_ARCHIVE"
+# Not part of the submitted source: CLAUDE.md holds instructions for an AI coding
+# assistant, and the course brief is the module's own document.
+zip -q -r "$RELATIVE_ARCHIVE" .gitignore Makefile README.md docs scripts src tests \
+    -x "docs/Course Project.pdf"
 
-if ! unzip -tq "$ARCHIVE" >/dev/null; then
+if ! unzip -tq "$RELATIVE_ARCHIVE" >/dev/null; then
     echo "ERROR: archive validation failed: $ARCHIVE" >&2
     exit 1
 fi
