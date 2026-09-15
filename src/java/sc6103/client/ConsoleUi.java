@@ -378,6 +378,14 @@ public final class ConsoleUi {
             // both programs (D7), so nothing the user can do from this menu will change
             // the answer.
             sessionUnusable = true;
+            // docs/console-script.md sec. 1 names both modes, so the user knows which
+            // command line to change. The client knows its own mode; the server's is the
+            // other one, because there are only two.
+            final boolean leastOnce = config.semantics == Protocol.SEM_AT_LEAST_ONCE;
+            out.printf("Semantics mismatch. This client is %s but the server is%n"
+                            + "%s. Restart both with the same --semantics value.%n",
+                    leastOnce ? "at-least-once" : "at-most-once",
+                    leastOnce ? "at-most-once" : "at-least-once");
         }
         if (StatusText.isSessionLevel(status)) {
             // Codes 6-12 are protocol or configuration faults the user cannot fix from a

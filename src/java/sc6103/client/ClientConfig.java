@@ -389,6 +389,12 @@ public final class ClientConfig {
      */
     private static String endpointText(InetSocketAddress endpoint) {
         final InetAddress address = endpoint.getAddress();
+        // An unbound DatagramSocket takes the dual-stack wildcard, which Java renders as
+        // 0:0:0:0:0:0:0:0. The demo network is IPv4 and docs/console-script.md sec. 1
+        // shows 0.0.0.0, so the wildcard is printed in that form.
+        if (address != null && address.isAnyLocalAddress()) {
+            return "0.0.0.0:" + endpoint.getPort();
+        }
         final String text = (address == null) ? endpoint.getHostString() : address.getHostAddress();
         return text + ":" + endpoint.getPort();
     }
