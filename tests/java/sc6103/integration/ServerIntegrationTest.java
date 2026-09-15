@@ -1,9 +1,11 @@
 package sc6103.integration;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.PrintStream;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
@@ -14,9 +16,16 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import sc6103.client.ClientConfig;
+import sc6103.client.LossSimulator;
+import sc6103.client.MonitorSession;
+import sc6103.client.RequestReply;
+import sc6103.client.TraceLog;
+import sc6103.client.UdpChannel;
 import sc6103.common.Codec;
 import sc6103.common.CodecException;
 import sc6103.common.Header;
@@ -209,6 +218,13 @@ public final class ServerIntegrationTest {
 
         boolean isAlive() {
             return process.isAlive();
+        }
+
+        /** A snapshot of every line the server has printed so far. */
+        List<String> lines() {
+            synchronized (output) {
+                return new ArrayList<>(output);
+            }
         }
 
         boolean outputContains(String text) {
@@ -512,6 +528,91 @@ public final class ServerIntegrationTest {
         }
     }
 
+    /**
+     * The Java console client's own request-reply stack without the console:
+     * {@link ClientConfig}, {@link UdpChannel}, {@link TraceLog}, {@link LossSimulator} and
+     * {@link RequestReply}, wired the way {@code Main} wires them.
+     *
+     * <p>CLAUDE.md makes the real client the test driver for the server. Checks about
+     * retries, reply matching and monitoring go through this class; the hand-built
+     * {@link Client} remains for datagrams the real client would never send.
+     */
+    static final class RealClient implements AutoCloseable {
+        final ClientConfig config;
+        final TraceLog trace;
+        final UdpChannel channel;
+        final RequestReply engine;
+
+        RealClient(int port, String semantics, int timeoutMs, int retries) throws IOException {
+            config = ClientConfig.parse(new String[] {
+                    "--host", InetAddress.getLoopbackAddress().getHostAddress(),
+                    "--port", Integer.toString(port),
+                    "--semantics", semantics,
+                    "--timeout", Integer.toString(timeoutMs),
+                    "--retries", Integer.toString(retries),
+                    "--seed", "1"});
+            final long clientId = RequestReply.newClientId();
+            trace = new TraceLog(new PrintStream(new ByteArrayOutputStream(), true,
+                    StandardCharsets.UTF_8), clientId);
+            channel = new UdpChannel(config.host, config.port, trace);
+            engine = new RequestReply(channel, config, trace,
+                    new LossSimulator(1L, 0.0, 0.0, false), clientId);
+        }
+
+        /** The client id in the form both programs print it. */
+        String clientHex() {
+            return String.format(Locale.ROOT, "0x%08X", engine.clientId() & 0xFFFFFFFFL);
+        }
+
+        @Override
+        public void close() {
+            channel.close();
+        }
+    }
+
+    /**
+     * README sec. 18 steps 6 and 7 with the real client on both ends: a monitoring client
+     * registers, a second client reserves while the server drops the first RESERVE reply,
+     * and the monitor session summarises what it saw. Under at-least-once the reservation
+     * runs twice and the monitor names the repeat; under at-most-once it runs once.
+     */
+    private static void realClientReplay(Path binary, String semantics, int expectedSeats,
+                                         String expectedSummary, boolean expectRepeat,
+                                         String labelPrefix) throws Exception {
+        int port = freePort();
+        try (ServerProcess server = new ServerProcess(binary, port, semantics,
+                    "--drop-first-reply", Integer.toString(Protocol.OP_RESERVE));
+             RealClient monitor = new RealClient(port, semantics, 150, 3);
+             RealClient reserver = new RealClient(port, semantics, 150, 3)) {
+            RequestReply.Outcome registration = monitor.engine.call(Protocol.OP_MONITOR,
+                    new Requests.Monitor(1934, 600)::write);
+            boolean registered = !registration.timedOut
+                    && registration.header.status == StatusCode.OK;
+            check(registered, labelPrefix + " real client registers a monitor");
+            if (!registered) return;
+
+            RequestReply.Outcome reserve = reserver.engine.call(Protocol.OP_RESERVE,
+                    new Requests.Reserve(1934, 2)::write);
+            check(!reserve.timedOut && reserve.transmissions == 2
+                            && Replies.Reserve.read(reserve.body).seatsAvailable == expectedSeats,
+                    labelPrefix + " real client retransmits once and sees " + expectedSeats
+                            + " seats");
+
+            ByteArrayOutputStream captured = new ByteArrayOutputStream();
+            new MonitorSession(1934, 600, Replies.Monitor.read(registration.body).seatsAvailable,
+                    monitor.config.timeoutMs, monitor.trace,
+                    new PrintStream(captured, true, StandardCharsets.UTF_8)).run(monitor.engine);
+            String summary = captured.toString(StandardCharsets.UTF_8);
+            check(summary.contains(expectedSummary),
+                    labelPrefix + " monitor session reports \"" + expectedSummary + "\"");
+            check(summary.contains("twice") == expectRepeat, labelPrefix
+                    + (expectRepeat ? " monitor names the repeated execution"
+                                    : " monitor sees no repeated execution"));
+            check(server.outputContains("client=" + reserver.clientHex()),
+                    labelPrefix + " server log names the client as the client prints it");
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         String binaryProperty = System.getProperty("sc6103.server.binary");
         if (binaryProperty == null || binaryProperty.isEmpty()) {
@@ -523,6 +624,10 @@ public final class ServerIntegrationTest {
         retrySemantics(binary, "at-most-once", 118, "I32-I34 at-most-once:");
         retrySemantics(binary, "at-least-once", 116, "I35-I37 at-least-once:");
         restartRestoresSeed(binary);
+        realClientReplay(binary, "at-least-once", 116, "2 of 2 updates received", true,
+                "I39-I43 at-least-once:");
+        realClientReplay(binary, "at-most-once", 118, "1 of 1 updates received", false,
+                "I44-I48 at-most-once:");
         System.out.println("\nServer integration: " + checks + " checks, " + failures
                 + " failures");
         if (failures != 0) System.exit(1);
