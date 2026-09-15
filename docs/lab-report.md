@@ -52,12 +52,16 @@ demonstrations deterministic.
 
 Successful reservations notify every active monitor. Each fire-and-forget callback has a
 per-registration sequence number and the event request ID. This exposes lost callbacks
-and duplicate execution. `MONITOR_END` reports the final callback count; the client's
-monotonic local deadline remains authoritative because the end notice may also be lost.
+and duplicate execution. `MONITOR_END` reports the final callback count. The end notice
+may itself be lost, so the client's monotonic deadline bounds the wait. The client still
+listens for one retry timeout past that deadline, because the server sends the notice from
+its expiry sweep a few milliseconds after the interval ends.
 
 ## 4. Experiments and results
 
 Each probabilistic scenario was run 20 times with server-side injection and seeds 0-19.
+The harness drives the Java client's own `RequestReply` with a 35 ms timeout and 9
+retries, and E10 reads the client's monitor summary.
 
 | Experiment | Result |
 |---|---|
@@ -66,26 +70,29 @@ Each probabilistic scenario was run 20 times with server-side injection and seed
 | E3, reply loss + `RESERVE`, at-most-once | 20/20 correct |
 | E4, reply loss + `ADJUST_FARE`, at-least-once | 8/20 over-adjusted |
 | E5, reply loss + `ADJUST_FARE`, at-most-once | 20/20 correct |
-| E6, reply loss + `SET_FARE`, at-least-once | 20/20 correct despite repeats |
+| E6, reply loss + `SET_FARE`, at-least-once | 20/20 correct, with `SET_FARE` re-executed in 15 of them |
 | E7, request loss + `RESERVE` | 40/40 correct under both semantics |
 | E8, reply loss with monitor active | 6/20 exposed duplicate event IDs |
-| E9, 200 at-most-once requests | acknowledgement-driven eviction observed |
-| E10, callback loss | 20/20 final totals reconciled; callback loss observed in all runs |
+| E9, 200 at-most-once requests | history peaked at 1 entry per client with `ackUpTo` and at the 64-entry cap without it |
+| E10, callback loss | 20/20 monitor summaries reconciled; callback loss observed in all runs |
 
 The results isolate reply loss as the important failure case. Request loss only delays an
 operation until a request arrives. Reply loss occurs after execution, so at-least-once
 retransmission can repeat a relative mutation. At-most-once replay prevents this for both
-non-idempotent operations. Repeated `SET_FARE` remains correct even under at-least-once,
-confirming that the problem is the operation's idempotency rather than retransmission
-alone.
+non-idempotent operations. The server re-executed `SET_FARE` in 15 of the 20
+at-least-once trials and the fare was still correct in all 20, which shows that the
+problem is the operation's idempotency rather than retransmission alone.
 
 ## 5. Verification and limitations
 
-The automated checks include 20 C++ protocol checks, 222 Java conformance assertions,
-37 Java client-behaviour assertions, and 53 Java-to-C++ UDP integration checks. They cover
-all operations, cross-language decoding, error replies, reply replay, request-ID conflict,
-semantics mismatch, concurrent monitors, idle expiry, deterministic reply loss, and
-restart behaviour. All 332 checks pass, and all ten experiment groups pass.
+The automated checks include 56 C++ conformance checks covering every vector in
+`tests/conformance/vectors.md`, 222 Java conformance assertions, 46 Java client-behaviour
+assertions, and 63 Java-to-C++ UDP integration checks. They cover all operations,
+cross-language decoding, error replies, reply replay, request-ID conflict, semantics
+mismatch, concurrent monitors, idle expiry, deterministic reply loss, and restart
+behaviour. Ten of the integration checks run the real Java client and its monitor session
+against the server with a forced reply drop under both semantics. All 387 checks pass, and
+all ten experiment groups pass.
 
 The at-most-once guarantee and flight data last only for one server process. Callbacks
 have maybe semantics and are not retried. Authentication, persistence, and encryption are

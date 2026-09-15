@@ -13,7 +13,7 @@ the live demonstration.
 
 | | |
 |---|---|
-| **Done** | Java client; C++17 server; 332 automated checks; E1-E10 experiment harness and results; report draft |
+| **Done** | Java client; C++17 server; 387 automated checks; E1-E10 experiment harness and results; report draft |
 | **Next** | fill the report cover, run the three-machine firewall/reachability rehearsal, and capture final demo evidence |
 | **Not automated** | physical multi-host demonstration and NTULearn submission |
 
@@ -735,7 +735,11 @@ Mechanism 1 does the work; 2 and 3 make the bound absolute.
 **Hard constraint 1 — TTL floor.** `HISTORY_TTL_MS > timeoutMs × (maxRetries + 1)`. A
 TTL shorter than the client's maximum retry window would let an entry expire while a
 legitimate retransmission is still in flight, silently degrading at-most-once to
-at-least-once. This is checked at server startup and refuses to run if violated.
+at-least-once. The server checks the floor when it is compiled, against the client's
+default 750 ms timeout and 3 retries, and the build fails if it does not hold. A running
+server cannot see a client's `--timeout` or `--retries`, so a client whose retry window
+is longer than the 60 s TTL can still break the guarantee. The client prints both values
+in its banner, which makes such a run visible in its log.
 
 **Hard constraint 2 — watermark ordering.** `ackUpTo < requestId` on every request,
 and the server **rejects** a request that violates it with `ERR_INVALID_ARGUMENT`
@@ -1177,7 +1181,8 @@ duplicate filtering, and re-execute versus retransmit-stored-reply.
 ### D8 — History bounded by piggybacked acknowledgement
 
 **Decision.** A watermark on every request, plus a per-client cap and an idle TTL as
-backstops, with `HISTORY_TTL_MS > timeoutMs × (maxRetries + 1)` enforced at startup.
+backstops, with `HISTORY_TTL_MS > timeoutMs × (maxRetries + 1)` checked when the server
+is compiled, against the client's default retry settings (§8.3).
 Marshalled bytes are stored, not structured results, and stored before the send is
 attempted.
 
@@ -1719,6 +1724,16 @@ and an observed fare are compared bit-for-bit rather than within a tolerance. A
 tolerance would hide exactly the small divergence a single duplicated `ADJUST_FARE`
 produces.
 
+`tests/java/sc6103/integration/ExperimentHarness.java` runs the plan. Every exchange
+goes through the Java client's own `RequestReply`, and E10's counts come from its
+`MonitorSession` summary, so the retry loop, reply matching and `ackUpTo` being measured
+are the console client's. Two settings differ from a console session: the timeout is
+35 ms with 9 retries, which keeps 20 trials per scenario quick on loopback, and loss is
+injected on the server only. E6 counts the trials in which the server logged a
+re-executed `SET_FARE`. E9 reads the per-client history size the server prints on every
+`CACHE` line, once for a client that acknowledges and once for hand-built requests that
+never do.
+
 ---
 
 ## 14. Test plan
@@ -1794,17 +1809,20 @@ javac -d build/classes $(find src/java -name '*.java')    # equivalent, by hand
 **C++ server** — Winsock on native Windows (§22.3):
 
 ```
-make PLATFORM=windows     # links ws2_32
-make                      # Linux/macOS: c++ -std=c++17 -Wall -Wextra -O2
+make                      # c++ -std=c++17 -Wall -Wextra -O2; links ws2_32 on Windows
 ```
+
+The Makefile detects Windows on its own. A Windows machine without `make` can build
+and test the server with `scripts/test-all.ps1`, which calls `clang++` or `g++`
+directly.
 
 **Complete local verification** — builds both languages, runs four automated suites,
 and optionally executes all E1-E10 experiments with 20 trials per probabilistic case:
 
 ```
-scripts/test-all.ps1                 # Windows: 332 checks
+scripts/test-all.ps1                 # Windows: 387 checks
 scripts/test-all.ps1 -Experiments    # Windows: checks plus E1-E10
-sh scripts/test-all.sh                  # Linux/macOS: 332 checks
+sh scripts/test-all.sh                  # Linux/macOS: 387 checks
 sh scripts/test-all.sh --experiments    # Linux/macOS: checks plus E1-E10
 ```
 
@@ -1959,19 +1977,28 @@ Three machines: server, client A (reserving), client B (monitoring).
 5. Client A: `ADJUST_FARE -50.0`, then `SET_FARE 750.0`. Show the fare changing on a
    `QUERY_BY_ID`. Client B prints nothing — say out loud that this is expected, and
    why (§9.2).
-6. Restart with `--semantics at-least-once --drop-reply 0.5 --seed 42`. Client A:
-   `RESERVE 2`. Show the client retransmitting, the server executing twice, client B
-   receiving two callbacks **with the same `eventRequestId`**, and the invariant
-   assertion firing.
-7. Restart with `--semantics at-most-once --drop-reply 0.5 --seed 42`. Repeat. Show
-   `DUPLICATE ... replaying stored reply`, one callback, correct final count.
-8. Repeat step 6 with `SET_FARE` under at-least-once: two executions, identical final
-   fare. Then repeat with `ADJUST_FARE`: two executions, fare wrong by one delta. Run
-   them back to back — the contrast between those two is the idempotency result.
-9. Show the monitor interval expiring, `MONITOR_END` arriving, and client B reporting
-   its received-versus-sent callback count.
+6. Restart the server with `--semantics at-least-once --drop-first-reply 3` and both
+   clients with `--semantics at-least-once`. Client B monitors the flight again, then
+   client A sends `RESERVE 2`. The server executes, drops the reply
+   (`DROP ... forced-first-reply`), and executes again when client A retransmits
+   (`EXECUTE ... re-executed`). Client B prints two callbacks **with the same
+   `eventRequestId`** and the line "server executed reqN twice", and the server logs
+   `ORACLE_ERROR ... diverged`.
+7. Restart the server with `--semantics at-most-once --drop-first-reply 3` and both
+   clients with `--semantics at-most-once`, then repeat step 6. The server answers the
+   retransmission from its history (`CACHE_HIT ... replay`), client B gets one callback,
+   and the seat count is correct.
+8. Restart with `--semantics at-least-once --drop-first-reply 6` and send
+   `SET_FARE 750.0`: two executions, final fare 750.00, `ORACLE_OK`. Restart with
+   `--drop-first-reply 5` and send `ADJUST_FARE 10.0`: two executions, a fare one delta
+   too high, and `ORACLE_ERROR`. Run the two back to back, because the contrast between
+   them is the idempotency result.
+9. Let client B's interval expire. It receives `MONITOR_END` and prints how many of the
+   updates the server sent actually arrived.
 
-Steps 6–8 are the graded core. Rehearse until they run without hesitation.
+Steps 6 to 8 are the graded core. Each `--drop-first-reply` rule fires once per server
+start (D25), so restart the server before repeating a step. Rehearse until they run
+without hesitation.
 
 ---
 
@@ -2018,7 +2045,7 @@ Steps 6–8 are the graded core. Rehearse until they run without hesitation.
 | Winsock/BSD divergence on the demo machine | server will not build on the day | fix the server OS at M0; it changes the server from its first line |
 | Firewall blocks UDP between laptops | demo fails | test the three-machine path early on the network the demo will use |
 | Client/server semantics mismatch during experiments | results look valid but mean nothing | `semantics` header field, rejected on mismatch (D19) |
-| History TTL shorter than the retry window | at-most-once silently degrades | startup check enforces the constraint (D8) |
+| History TTL shorter than the retry window | at-most-once silently degrades | compile-time check against the client's default retry settings (§8.3, D8); the client banner records any override |
 | Reused request ID replays the wrong reply | silent wrong answer | request fingerprint, `ERR_REQUEST_ID_CONFLICT` (D24) |
 | Monitor expiry never fires on an idle server | registrations outlive their interval | bounded socket wait (§6.1); regression test T15 |
 | Probabilistic loss does not fire during the demo | the graded point is not made | deterministic `--drop-first-*` rules (D25) |

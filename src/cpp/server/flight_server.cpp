@@ -46,6 +46,9 @@ constexpr std::size_t MAX_HISTORY_PER_CLIENT = 64;
 constexpr std::size_t MAX_ORACLE_EVENTS = 512;
 constexpr auto HISTORY_TTL = std::chrono::seconds(60);
 constexpr auto MAX_POLL = std::chrono::milliseconds(100);
+// README sec. 8.3 hard constraint 1: HISTORY_TTL_MS > timeoutMs x (maxRetries + 1). A
+// running server never learns a client's --timeout or --retries, so the floor is checked
+// here at compile time against the client defaults of 750 ms and 3 retries (D13).
 constexpr auto CLIENT_RETRY_WINDOW = std::chrono::milliseconds(750 * 4);
 
 static_assert(HISTORY_TTL > CLIENT_RETRY_WINDOW,

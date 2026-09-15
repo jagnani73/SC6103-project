@@ -262,6 +262,9 @@ gap:
 [DROP] req=29 dir=request reason=forced-first-request
 ```
 
+The reply that follows the retransmission is labelled `first-transmission`, not
+`cache-replay`, because the server has seen only one copy of the request.
+
 Discarded datagrams:
 
 ```

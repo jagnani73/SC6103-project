@@ -164,8 +164,8 @@ whatever the table says:
 Where things stand: the specification and both implementations are complete. The Java
 console client is finished from the UI through the retry engine and UDP channel; the
 C++17 server implements all six operations, both invocation semantics, monitoring and
-fault injection. The automated suites currently pass 332 checks and the E1-E10 harness
-passes all ten experiment groups. A report draft exists. The remaining acceptance work
+fault injection. The automated suites currently pass 387 checks, and the E1-E10 harness,
+which drives the real Java client, passes all ten experiment groups. A report draft exists. The remaining acceptance work
 is physical: fill the report cover, prove three-machine reachability on the demo network,
 capture final evidence, and rehearse the live demonstration.
 
