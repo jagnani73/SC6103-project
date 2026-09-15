@@ -48,6 +48,7 @@ public final class ClientBehaviourTest {
 
         run("RETRY-identical", ClientBehaviourTest::retryIsByteIdentical);
         run("RETRY-exhaustion", ClientBehaviourTest::exhaustionReportsTimeout);
+        run("RETRY-localdrop", ClientBehaviourTest::localDropIsNotAReplay);
         run("DISCARD-stale", ClientBehaviourTest::staleReplyDiscarded);
         run("DISCARD-foreign", ClientBehaviourTest::foreignClientIdDiscarded);
         run("DISCARD-lengthlie", ClientBehaviourTest::payloadLenDisagreementDiscarded);
@@ -138,6 +139,36 @@ public final class ClientBehaviourTest {
             checkNum("engine counted one timeout", 1, f.engine.timeouts());
             f.peer.awaitRequests(4, 500);
             checkNum("peer saw four datagrams", 4, f.peer.received().size());
+            checkNum("all four attempts were transmitted", 4, o.transmissions);
+        }
+    }
+
+    /**
+     * A reply that follows a request this client suppressed itself is reported as the
+     * answer to the only copy the server saw, not as a replay or a re-execution.
+     *
+     * <p>With {@code --drop-first-request} the reply arrives on attempt 2, but only one
+     * datagram ever reached the server. Labelling it {@code cache-replay} would tell a demo
+     * audience that the history answered a duplicate that never existed.
+     */
+    private static void localDropIsNotAReplay() throws Exception {
+        try (Fixture f = new Fixture(1, 150, 2)) {
+            f.peer.then(ScriptedPeer.ok()).start();
+
+            final ByteArrayOutputStream traced = new ByteArrayOutputStream();
+            final TraceLog trace = new TraceLog(
+                    new PrintStream(traced, true, StandardCharsets.UTF_8), 0L);
+            final RequestReply engine = new RequestReply(f.channel, f.config, trace,
+                    new LossSimulator(1L, 0.0, 0.0, true), RequestReply.newClientId());
+
+            final RequestReply.Outcome o =
+                    engine.call(Protocol.OP_QUERY_BY_ID, new Requests.Flight(1934)::write);
+
+            checkObj("reply arrived", Boolean.FALSE, o.timedOut);
+            checkNum("answered on attempt 2", 2, o.attempts);
+            checkNum("only one datagram was transmitted", 1, o.transmissions);
+            checkObj("trace labels the reply first-transmission", Boolean.TRUE,
+                    traced.toString(StandardCharsets.UTF_8).contains("first-transmission"));
         }
     }
 

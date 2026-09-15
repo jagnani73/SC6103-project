@@ -210,7 +210,7 @@ public final class ConsoleUi {
             out.println();
             out.printf("Reserved %d seats on flight %d. %d now available.%n",
                     seats, flightId, r.seatsAvailable);
-            if (o.attempts > 1) {
+            if (o.transmissions > 1) {
                 explainRetryOutcome();
             }
         } catch (CodecException e) {
@@ -294,7 +294,7 @@ public final class ConsoleUi {
             // experiment E4 is trying to make visible.
             out.printf("Fare for flight %d changed by %s, now %s.%n",
                     flightId, money(delta), money(r.airfare));
-            if (o.attempts > 1) {
+            if (o.transmissions > 1) {
                 explainRetryOutcome();
             }
         } catch (CodecException e) {
@@ -332,7 +332,7 @@ public final class ConsoleUi {
             final Replies.Fare r = Replies.Fare.read(o.body);
             out.println();
             out.printf("Fare for flight %d is now %s.%n", flightId, money(r.airfare));
-            if (o.attempts > 1) {
+            if (o.transmissions > 1) {
                 // The idempotency claim, stated where a demo audience can see it. Running
                 // the identical request again prints the identical result - that is the
                 // whole point of operation 6 and it is worth saying out loud.

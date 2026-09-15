@@ -69,11 +69,21 @@ public final class RequestReply {
         public final Codec body;
         public final int attempts;
 
-        private Outcome(boolean timedOut, Header header, Codec body, int attempts) {
+        /**
+         * Datagrams this call actually put on the wire. Lower than {@link #attempts} only
+         * when this client's own loss injection suppressed a send. The server can have
+         * replayed or re-executed the request only if this is above 1, so the console
+         * explains a retry outcome from this count rather than from the attempt number.
+         */
+        public final int transmissions;
+
+        private Outcome(boolean timedOut, Header header, Codec body, int attempts,
+                        int transmissions) {
             this.timedOut = timedOut;
             this.header = header;
             this.body = body;
             this.attempts = attempts;
+            this.transmissions = transmissions;
         }
     }
 
@@ -181,6 +191,7 @@ public final class RequestReply {
                     + " must be below requestId " + requestId + " (README sec. 8.3)");
         }
 
+        int transmissions = 0;
         for (int attempt = 1; attempt <= config.maxRetries + 1; attempt++) {
             if (attempt > 1) {
                 trace.retry(requestId, opCode, attempt);
@@ -194,12 +205,13 @@ public final class RequestReply {
                 trace.send(requestId, opCode, attempt, "transmitted");
                 channel.send(txBuf, length);
                 requestsSent++;
+                transmissions++;
             }
 
             final long deadline = System.nanoTime()
                     + TimeUnit.MILLISECONDS.toNanos(config.timeoutMs);
 
-            final Outcome reply = awaitReply(requestId, opCode, attempt, deadline);
+            final Outcome reply = awaitReply(requestId, opCode, attempt, transmissions, deadline);
             if (reply != null) {
                 return reply;
             }
@@ -208,17 +220,18 @@ public final class RequestReply {
         }
 
         timeouts++;
-        return new Outcome(true, null, null, config.maxRetries + 1);
+        return new Outcome(true, null, null, config.maxRetries + 1, transmissions);
     }
 
     /**
      * Waits until {@code deadline} for the reply to {@code requestId}, dispatching any
      * unsolicited traffic that arrives meanwhile.
      *
+     * @param transmissions datagrams sent for this request so far, including this attempt's
      * @return the matching reply, or {@code null} if the deadline passed
      */
-    private Outcome awaitReply(int requestId, int opCode, int attempt, long deadline)
-            throws IOException {
+    private Outcome awaitReply(int requestId, int opCode, int attempt, int transmissions,
+                               long deadline) throws IOException {
         while (true) {
             final UdpChannel.Inbound in = channel.receive(deadline);
             if (in == null) {
@@ -275,8 +288,9 @@ public final class RequestReply {
                 ackUpTo = requestId;
             }
 
-            trace.recv(requestId, opCode, attempt, in.header.status, decisionFor(attempt));
-            return new Outcome(false, in.header, in.body, attempt);
+            trace.recv(requestId, opCode, attempt, in.header.status,
+                    decisionFor(attempt, transmissions));
+            return new Outcome(false, in.header, in.body, attempt, transmissions);
         }
     }
 
@@ -332,9 +346,15 @@ public final class RequestReply {
      * distinguishes those. The label is marked inferred so a demo trace is suggestive
      * without the client asserting something it cannot know (README sec. 7.2).
      */
-    private String decisionFor(int attempt) {
+    private String decisionFor(int attempt, int transmissions) {
         if (attempt == 1) {
             return "first-attempt";
+        }
+        if (transmissions <= 1) {
+            // Every earlier attempt was suppressed by this client's own loss injection, so
+            // the server has seen exactly one copy. Nothing was replayed or re-executed,
+            // and that much the client does know.
+            return "first-transmission";
         }
         return config.semantics == Protocol.SEM_AT_MOST_ONCE
                 ? "cache-replay?inferred"
