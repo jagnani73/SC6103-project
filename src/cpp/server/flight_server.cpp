@@ -372,6 +372,35 @@ float float_from_bits(std::uint32_t bits) {
     return value;
 }
 
+// Two decimals is exact for every fare this system produces: the seed fares and the
+// README sec. 13 trial deltas are all halves and quarters, so a one-delta divergence
+// is still visible in the log. The oracle itself compares bit patterns, not this text.
+std::string fare_text(float value) {
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(2) << value;
+    return out.str();
+}
+
+std::string departure_text(const DepartureTime& time) {
+    std::ostringstream out;
+    out << std::setfill('0') << std::setw(4) << time.year << '-'
+        << std::setw(2) << time.month << '-' << std::setw(2) << time.day << ' '
+        << std::setw(2) << time.hour << ':' << std::setw(2) << time.minute;
+    return out.str();
+}
+
+// Place names are client-supplied bytes. Control characters and quotes are masked so
+// one request always stays one log line (README sec. 10.2).
+std::string quoted_place(const std::array<char, MAX_STRING_BYTES + 1>& text,
+                         std::size_t length) {
+    std::string result = "\"";
+    for (std::size_t i = 0; i < length; ++i) {
+        const auto byte = static_cast<unsigned char>(text[i]);
+        result += (byte < 0x20U || byte == 0x7FU || byte == '"') ? '?' : text[i];
+    }
+    return result + '"';
+}
+
 class Server {
 public:
     Server(SocketHandle socket, const Config& config)
@@ -552,6 +581,20 @@ private:
         if (mutated_flight != 0) assert_expected_state(mutated_flight);
     }
 
+    // The brief requires the server to print every request it receives and every reply it
+    // produces. RECV and SEND carry header fields only, so these two lines add what was
+    // actually asked and answered. An error reply has no values, and its SEND line already
+    // names the status, so RESULT is written for successful replies only.
+    void log_args(const Header& request, const std::string& args) {
+        log_line("ARGS", "request", request.client_id, request.request_id, request.opcode,
+                 "decoded", args);
+    }
+
+    void log_result(const Header& request, const std::string& result) {
+        log_line("RESULT", "reply", request.client_id, request.request_id, request.opcode,
+                 "OK", result);
+    }
+
     std::int32_t dispatch(const Header& request, const std::uint8_t* body,
                           std::size_t body_length, const Endpoint& from,
                           bool first_oracle_event,
@@ -573,6 +616,8 @@ private:
                     || in.remaining() != 0) {
                 return ERR_MALFORMED_REQUEST;
             }
+            log_args(request, "source=" + quoted_place(source, source_length)
+                     + " destination=" + quoted_place(destination, destination_length));
             if (source_length == 0 || destination_length == 0) return ERR_INVALID_ARGUMENT;
             std::array<std::int32_t, MAX_ROUTE_RESULTS> matches{};
             std::size_t count = 0;
@@ -589,10 +634,17 @@ private:
             std::sort(matches.begin(), matches.begin() + static_cast<std::ptrdiff_t>(count));
             out.put_i32(truncated ? 1 : 0);
             out.put_u32(static_cast<std::uint32_t>(count));
-            for (std::size_t i = 0; i < count; ++i) out.put_i32(matches[i]);
+            std::string ids;
+            for (std::size_t i = 0; i < count; ++i) {
+                out.put_i32(matches[i]);
+                ids += (i == 0 ? "" : ",") + std::to_string(matches[i]);
+            }
+            log_result(request, "truncated=" + std::to_string(truncated ? 1 : 0)
+                       + " count=" + std::to_string(count) + " ids=" + ids);
         } else if (request.opcode == OP_QUERY_BY_ID) {
             std::int32_t id = 0;
             if (!in.get_i32(id) || in.remaining() != 0) return ERR_MALFORMED_REQUEST;
+            log_args(request, "flight=" + std::to_string(id));
             Flight* flight = find_flight(id);
             if (flight == nullptr) return ERR_UNKNOWN_FLIGHT;
             out.put_i32(flight->departure.year);
@@ -602,12 +654,16 @@ private:
             out.put_i32(flight->departure.minute);
             out.put_f32(flight->fare);
             out.put_i32(flight->seats);
+            log_result(request, "departure=" + departure_text(flight->departure)
+                       + " fare=" + fare_text(flight->fare)
+                       + " seats=" + std::to_string(flight->seats));
         } else if (request.opcode == OP_RESERVE) {
             std::int32_t id = 0;
             std::int32_t seats = 0;
             if (!in.get_i32(id) || !in.get_i32(seats) || in.remaining() != 0) {
                 return ERR_MALFORMED_REQUEST;
             }
+            log_args(request, "flight=" + std::to_string(id) + " seats=" + std::to_string(seats));
             if (seats < 1) return ERR_INVALID_ARGUMENT;
             Flight* flight = find_flight(id);
             if (flight == nullptr) return ERR_UNKNOWN_FLIGHT;
@@ -620,12 +676,15 @@ private:
             log_line("EXECUTE", "request", request.client_id, request.request_id,
                      request.opcode, first_oracle_event ? "new" : "re-executed",
                      "seats=" + std::to_string(before) + "->" + std::to_string(flight->seats));
+            log_result(request, "seats=" + std::to_string(flight->seats));
         } else if (request.opcode == OP_MONITOR) {
             std::int32_t id = 0;
             std::int32_t interval_ms = 0;
             if (!in.get_i32(id) || !in.get_i32(interval_ms) || in.remaining() != 0) {
                 return ERR_MALFORMED_REQUEST;
             }
+            log_args(request, "flight=" + std::to_string(id)
+                     + " interval_ms=" + std::to_string(interval_ms));
             if (interval_ms < 1 || interval_ms > MAX_MONITOR_INTERVAL_MS) {
                 return ERR_INVALID_ARGUMENT;
             }
@@ -635,6 +694,8 @@ private:
             if (status == OK) {
                 out.put_i32(flight->seats);
                 out.put_i32(interval_ms);
+                log_result(request, "seats=" + std::to_string(flight->seats)
+                           + " expires_in_ms=" + std::to_string(interval_ms));
             }
         } else if (request.opcode == OP_ADJUST_FARE) {
             std::int32_t id = 0;
@@ -643,6 +704,7 @@ private:
                 return ERR_MALFORMED_REQUEST;
             }
             const float delta = float_from_bits(fare_bits);
+            log_args(request, "flight=" + std::to_string(id) + " delta=" + fare_text(delta));
             if (!std::isfinite(delta)) return ERR_INVALID_ARGUMENT;
             Flight* flight = find_flight(id);
             if (flight == nullptr) return ERR_UNKNOWN_FLIGHT;
@@ -655,7 +717,8 @@ private:
             out.put_f32(flight->fare);
             log_line("EXECUTE", "request", request.client_id, request.request_id,
                      request.opcode, first_oracle_event ? "new" : "re-executed",
-                     "fare=" + std::to_string(before) + "->" + std::to_string(flight->fare));
+                     "fare=" + fare_text(before) + "->" + fare_text(flight->fare));
+            log_result(request, "fare=" + fare_text(flight->fare));
         } else if (request.opcode == OP_SET_FARE) {
             std::int32_t id = 0;
             std::uint32_t fare_bits = 0;
@@ -663,6 +726,8 @@ private:
                 return ERR_MALFORMED_REQUEST;
             }
             const float new_fare = float_from_bits(fare_bits);
+            log_args(request, "flight=" + std::to_string(id)
+                     + " new_fare=" + fare_text(new_fare));
             if (!std::isfinite(new_fare)) return ERR_INVALID_ARGUMENT;
             if (!legal_fare(new_fare)) return ERR_INVALID_FARE;
             Flight* flight = find_flight(id);
@@ -674,7 +739,8 @@ private:
             out.put_f32(flight->fare);
             log_line("EXECUTE", "request", request.client_id, request.request_id,
                      request.opcode, first_oracle_event ? "new" : "re-executed",
-                     "fare=" + std::to_string(before) + "->" + std::to_string(flight->fare));
+                     "fare=" + fare_text(before) + "->" + fare_text(flight->fare));
+            log_result(request, "fare=" + fare_text(flight->fare));
         }
 
         if (!out.ok()) return ERR_SERVER_ERROR;
@@ -861,8 +927,8 @@ private:
                  "flight=" + std::to_string(flight_id)
                  + " seats=" + std::to_string(flight->seats)
                  + "/" + std::to_string(flight->expected_seats)
-                 + " fare=" + std::to_string(flight->fare)
-                 + "/" + std::to_string(flight->expected_fare));
+                 + " fare=" + fare_text(flight->fare)
+                 + "/" + fare_text(flight->expected_fare));
     }
 
     std::size_t marshal_reply(const Header& request, std::int32_t status,
