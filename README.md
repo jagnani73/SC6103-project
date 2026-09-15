@@ -7,13 +7,15 @@ byte-level marshalling, timeouts and retransmission, duplicate filtering, reply
 histories, and server-to-client callbacks. No RPC framework is used; implementing
 that layer is the assignment.
 
-**Status:** design frozen; all three M0 forks closed on 3 September 2026 (§22).
+**Status:** implementation complete for local automated verification; all three M0
+forks remain closed (§22). A three-physical-machine rehearsal is still required before
+the live demonstration.
 
 | | |
 |---|---|
-| **Done** | Java marshalling layer, 222 passing conformance assertions, complete Java console client |
-| **Next** | the C++17 server — §17 M2 |
-| **Not started** | server, experiments, report |
+| **Done** | Java client; C++17 server; 332 automated checks; E1-E10 experiment harness and results; report draft |
+| **Next** | fill the report cover, run the three-machine firewall/reachability rehearsal, and capture final demo evidence |
+| **Not automated** | physical multi-host demonstration and NTULearn submission |
 
 **There is one server, written in C++17, and no fallback implementation.** §22.1 records
 that decision and what it costs. Read it before planning work.
@@ -1785,6 +1787,31 @@ make PLATFORM=windows     # links ws2_32
 make                      # Linux/macOS: c++ -std=c++17 -Wall -Wextra -O2
 ```
 
+**Complete local verification** — builds both languages, runs four automated suites,
+and optionally executes all E1-E10 experiments with 20 trials per probabilistic case:
+
+```
+scripts/test-all.ps1                 # Windows: 332 checks
+scripts/test-all.ps1 -Experiments    # Windows: checks plus E1-E10
+sh scripts/test-all.sh                  # Linux/macOS: 332 checks
+sh scripts/test-all.sh --experiments    # Linux/macOS: checks plus E1-E10
+```
+
+Windows requires JDK 17+ and `clang++`/`g++` on `PATH` (or set `JAVA_HOME` and
+`CXX`). Linux/macOS requires JDK 17+, a C++17 compiler, and `make`.
+
+After the final tested commit is selected, create and integrity-check the single-file
+NTULearn source archive with:
+
+```
+scripts/package.ps1       # Windows
+sh scripts/package.sh     # Linux/macOS
+```
+
+The generated `dist/SC6103-project-source.zip` is intentionally ignored by Git. The
+assignment permits no resubmission, so regenerate it from the final tagged commit and
+inspect its contents before the group representative uploads it.
+
 The C++ target keeps a POSIX path because a developer may build and unit-test the codec
 on Linux, but **the demo server runs on native Windows** and that is the configuration
 §17's M2 requires proven from a second physical machine.
@@ -1839,12 +1866,13 @@ src/
     sc6103/common/        marshalling, protocol constants, header and body codecs
     sc6103/client/        console UI, request/reply state machine, monitor session
   cpp/
-    server/               C++17 server - the only server
+    server/               C++17 protocol codec and the only server
 tests/
   conformance/            §11.2 hex vectors, encoded by both implementations
   java/                   Java-side conformance harness
-  experiments/            §13 harness and result logs
-scripts/                  build and demo helpers
+  cpp/                    C++ conformance harness
+  experiments/            §13 result summary
+scripts/                  build, test, experiment and packaging helpers
 ```
 
 **There is one server and it is written in C++17.** There is no Java server, no
@@ -1881,6 +1909,12 @@ complete one that forfeits a bonus. §20 carries the mitigations.
 | M6 | Fault injection and experiments | server-side drop gates, `--seed`, one-shot rules, E1–E10 | every experiment produces its predicted result, with logs captured per §24.3 |
 | M7 | Hardening and multi-host | malformed-input tests, firewall checks, clean-machine build, rehearsal | full §14 matrix passes or documented exceptions are agreed |
 | M8 | Final package | tagged commit, packed source file, report | every document matches the tagged code; rehearsal completes in the allotted time |
+
+The local software criteria through M6 are automated and passing. M2's second-physical-
+machine condition, M7's clean demo-network/firewall checks, and M8's team-specific cover,
+tag and rehearsal remain manual because they depend on the group's machines and identities
+rather than repository code. The M8 source archive itself is generated and validated by
+`scripts/package.ps1` or `scripts/package.sh`.
 
 **M2 is the milestone that de-risks the project**, and it is deliberately larger than a
 "hello world" would be. It forces the Winsock decision, the build, the byte-level
