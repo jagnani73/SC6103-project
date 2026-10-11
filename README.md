@@ -2012,8 +2012,59 @@ Three machines: server, client A (reserving), client B (monitoring).
    updates the server sent actually arrived.
 
 Steps 6 to 8 are the graded core. Each `--drop-first-reply` rule fires once per server
-start (D25), so restart the server before repeating a step. Rehearse until they run
-without hesitation.
+start (D25), so restart the server before repeating a step. Stop the running server
+before starting the next one. A second server on a port that is still in use exits with
+`port <n> is already in use` rather than starting. Rehearse until they run without
+hesitation.
+
+### Three-machine setup
+
+Do this once on the network the demo will use, with all three laptops joined to the same
+hotspot or router. A network that isolates wireless clients from each other will not carry
+the traffic.
+
+1. Build. On the server laptop, `scripts/test-all.ps1` produces
+   `build\cpp\flight_server.exe`. On each client laptop, `scripts/build.ps1` compiles the
+   client into `build\classes` (`sh scripts/build.sh` on Linux or macOS).
+2. Find the server's address. Run `ipconfig` on the server laptop and take the IPv4
+   address of the adapter joined to the shared network. A laptop with WSL, Hyper-V or a
+   VPN lists several addresses, and the virtual ones (a `vEthernet` adapter, for example)
+   cannot be reached from the other laptops.
+3. Open the firewall. From an administrator PowerShell on the server laptop, let the
+   server's port in:
+
+   ```
+   New-NetFirewallRule -DisplayName "SC6103 server" -Direction Inbound -Protocol UDP -LocalPort 5000 -Action Allow -Profile Any
+   ```
+
+   On each client laptop, let the server's datagrams in:
+
+   ```
+   New-NetFirewallRule -DisplayName "SC6103 client" -Direction Inbound -Protocol UDP -RemoteAddress <server-ip> -RemotePort 5000 -Action Allow -Profile Any
+   ```
+
+   The client rule matters for monitoring. A monitoring client sends nothing for the
+   whole interval, and without the rule the firewall may treat a late callback or
+   `MONITOR_END` as unsolicited and drop it. `Remove-NetFirewallRule -DisplayName "SC6103
+   server"` removes a rule afterwards, and the same with `"SC6103 client"`.
+4. Start the programs. §15.2 writes them as `flight_server` and `flight_client`. The
+   commands typed on the day are:
+
+   ```
+   build\cpp\flight_server.exe --port 5000 --semantics at-most-once
+   java -cp build\classes sc6103.client.Main --host <server-ip> --port 5000 --semantics at-most-once
+   ```
+
+   If `java` is not on `PATH`, use the `java.exe` in the same folder as the `javac` that
+   `scripts/build.ps1` prints.
+5. Check the path. From each client, run option 2 for flight 1934. If the client times
+   out and the server prints nothing, the request is not arriving, so check the address,
+   the server rule and the network. If the server prints `RECV` and `SEND` and the
+   client still times out, the reply is being dropped on the client laptop. Then monitor
+   a flight on client B for the interval the demo will use, and reserve on client A near
+   the end of it. Client B must print the callback and then `Monitor ended. 1 of 1
+   updates received, 0 lost.` If it prints `Monitor ended on local timer`, late datagrams
+   are being dropped on client B.
 
 ---
 
