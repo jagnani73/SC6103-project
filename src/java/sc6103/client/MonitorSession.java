@@ -37,9 +37,11 @@ import sc6103.common.Replies;
  * </ul>
  *
  * <p>And a third, which is about the other machine rather than this one: a repeated
- * {@code eventRequestId} means one client operation was executed twice. That is the
- * direct observable signature of at-least-once re-execution, and it is what experiment E8
- * reads off this display.
+ * {@code (eventClientId, eventRequestId)} pair means one client operation was executed
+ * twice. That is the direct observable signature of at-least-once re-execution, and it is
+ * what experiment E8 reads off this display. The pair is compared, never the
+ * {@code eventRequestId} alone: deck 2 slide 71 identifies a request by its requestId plus
+ * an identifier for the client process, and every client counts its requestIds from 0.
  */
 public final class MonitorSession implements RequestReply.AsyncHandler {
 
@@ -69,12 +71,12 @@ public final class MonitorSession implements RequestReply.AsyncHandler {
     private int received;
 
     /**
-     * Which {@code callbackSeq} first reported each {@code eventRequestId}.
+     * Which {@code callbackSeq} first reported each request, keyed by {@link #eventKey}.
      *
      * <p>Insertion-ordered so the end-of-session summary lists repeats in the order they
      * were observed, which is the order a demo audience watched them appear.
      */
-    private final Map<Integer, Integer> firstSeqByEvent = new LinkedHashMap<>();
+    private final Map<Long, Integer> firstSeqByEvent = new LinkedHashMap<>();
 
     private int repeatedEvents;
 
@@ -141,7 +143,8 @@ public final class MonitorSession implements RequestReply.AsyncHandler {
         }
 
         received++;
-        trace.callback(body.flightId, body.callbackSeq, body.seatsAvailable, body.eventRequestId);
+        trace.callback(body.flightId, body.callbackSeq, body.seatsAvailable,
+                body.eventClientId, body.eventRequestId);
         out.printf("    %d seats%n", body.seatsAvailable);
 
         // Gap detection. Reported, never hidden: README D10 makes callback loss documented
@@ -156,15 +159,30 @@ public final class MonitorSession implements RequestReply.AsyncHandler {
             highestSeq = body.callbackSeq;
         }
 
-        // A repeated eventRequestId is the visible fingerprint of at-least-once
-        // re-execution: two callbacks, one user action. Named explicitly because the
-        // seat count alone cannot distinguish it from two separate reservations.
-        final Integer firstSeq = firstSeqByEvent.putIfAbsent(body.eventRequestId, body.callbackSeq);
+        // A repeated (eventClientId, eventRequestId) pair is the visible fingerprint of
+        // at-least-once re-execution: two callbacks, one user action. Named explicitly
+        // because the seat count alone cannot distinguish it from two separate
+        // reservations.
+        final Integer firstSeq = firstSeqByEvent.putIfAbsent(
+                eventKey(body.eventClientId, body.eventRequestId), body.callbackSeq);
         if (firstSeq != null) {
             repeatedEvents++;
             out.printf("           ^ same event as seq=%d - server executed req%d twice%n",
                     firstSeq, body.eventRequestId);
         }
+    }
+
+    /**
+     * One map key for a request's whole identity: the reserving client's id in the high
+     * 32 bits and its requestId in the low 32.
+     *
+     * <p>Two reservations are the same request only if both halves match. Two clients
+     * that each send their first request both use requestId 0, and treating those as one
+     * request would report a re-execution that never happened, which under at-most-once
+     * contradicts the semantics being shown.
+     */
+    private static long eventKey(long eventClientId, int eventRequestId) {
+        return (eventClientId << 32) | (eventRequestId & 0xFFFFFFFFL);
     }
 
     @Override
@@ -199,8 +217,9 @@ public final class MonitorSession implements RequestReply.AsyncHandler {
         }
 
         if (repeatedEvents > 0) {
-            out.printf("%d update(s) repeated a previous eventRequestId - "
-                    + "the server executed those operations more than once.%n", repeatedEvents);
+            out.printf("%d update(s) repeated a previous request (same client and "
+                    + "requestId) - the server executed those operations more than once.%n",
+                    repeatedEvents);
         }
         out.println();
         // endedByServer is deliberately not printed as a status: which of the two ended the

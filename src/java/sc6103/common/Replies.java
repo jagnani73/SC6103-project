@@ -271,31 +271,42 @@ public final class Replies {
     // ---- Unsolicited ----
 
     /**
-     * {@code CALLBACK} body - README sec. 4, {@code messageType = 2}. Fixed 16 bytes.
+     * {@code CALLBACK} body - README sec. 4, {@code messageType = 2}. Fixed 20 bytes.
      *
-     * <p>Two of these four fields exist purely to make loss and duplication
+     * <p>Three of these five fields exist purely to make loss and duplication
      * <em>measurable</em> rather than merely admitted (D10):
      *
      * <ul>
      *   <li>{@code callbackSeq} counts from 1 per registration, so a client seeing
      *       1, 2, 4 knows one update was lost rather than guessing.</li>
-     *   <li>{@code eventRequestId} names the operation that caused the update, so two
-     *       callbacks from one duplicated operation (same value) are distinguishable
-     *       from two genuinely separate operations (different values). That is the
-     *       direct observable signature of at-least-once re-execution, and it is what
-     *       experiment E8 reads.</li>
+     *   <li>{@code eventClientId} and {@code eventRequestId} together name the operation
+     *       that caused the update, so two callbacks from one duplicated operation (same
+     *       pair) are distinguishable from two genuinely separate operations (different
+     *       pairs). That is the direct observable signature of at-least-once
+     *       re-execution, and it is what experiment E8 reads.</li>
      * </ul>
+     *
+     * <p>Both halves are needed. Deck 2 slide 71 defines a unique request identifier as
+     * the requestId plus an identifier for the client process, and every client counts
+     * its requestIds from 0, so two clients that each reserve once would otherwise look
+     * like one request executed twice.
      */
     public static final class Callback {
 
         public final int flightId;
         public final int seatsAvailable;
+
+        /** The reserving client's {@code clientId}: a {@code uint32}, so held in a long. */
+        public final long eventClientId;
+
         public final int eventRequestId;
         public final int callbackSeq;
 
-        public Callback(int flightId, int seatsAvailable, int eventRequestId, int callbackSeq) {
+        public Callback(int flightId, int seatsAvailable, long eventClientId,
+                        int eventRequestId, int callbackSeq) {
             this.flightId = flightId;
             this.seatsAvailable = seatsAvailable;
+            this.eventClientId = eventClientId;
             this.eventRequestId = eventRequestId;
             this.callbackSeq = callbackSeq;
         }
@@ -303,6 +314,7 @@ public final class Replies {
         public void write(Codec out) throws CodecException {
             out.putInt32(flightId);
             out.putInt32(seatsAvailable);
+            out.putUInt32(eventClientId);
             out.putInt32(eventRequestId);
             out.putInt32(callbackSeq);
         }
@@ -310,23 +322,31 @@ public final class Replies {
         public static Callback read(Codec in) throws CodecException {
             final int id = in.getInt32();
             final int seats = in.getInt32();
+            final long eventClient = in.getUInt32();
             final int event = in.getInt32();
             final int seq = in.getInt32();
             if (seats < 0) {
                 throw new CodecException("seatsAvailable " + seats + " is negative");
+            }
+            if (eventClient == 0L) {
+                // 0 is the reserved "unset" clientId (README sec. 2.3). The server refuses
+                // a request carrying it, so no reservation can have come from it.
+                throw new CodecException("eventClientId 0 is not a client");
             }
             if (seq < 1) {
                 // Sequence numbers start at 1, so 0 would make "no callbacks yet"
                 // indistinguishable from "the first callback" in the gap arithmetic.
                 throw new CodecException("callbackSeq " + seq + " must be >= 1");
             }
-            return new Callback(id, seats, event, seq);
+            return new Callback(id, seats, eventClient, event, seq);
         }
 
         @Override
         public String toString() {
             return "Callback[seq=" + callbackSeq + " flight=" + flightId
-                    + " seats=" + seatsAvailable + " event=" + eventRequestId + "]";
+                    + " seats=" + seatsAvailable + " event=" + eventRequestId
+                    + " by=" + String.format(java.util.Locale.ROOT, "0x%08X", eventClientId)
+                    + "]";
         }
     }
 

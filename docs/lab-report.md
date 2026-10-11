@@ -51,8 +51,8 @@ and callbacks have seeded probabilistic drop gates, while one-shot drop rules ma
 demonstrations deterministic.
 
 Successful reservations notify every active monitor. Each fire-and-forget callback has a
-per-registration sequence number and the event request ID. This exposes lost callbacks
-and duplicate execution. `MONITOR_END` reports the final callback count. The end notice
+per-registration sequence number, plus the client ID and request ID of the reservation
+that caused it. This exposes lost callbacks and duplicate execution. `MONITOR_END` reports the final callback count. The end notice
 may itself be lost, so the client's monotonic deadline bounds the wait. The client still
 listens for one retry timeout past that deadline, because the server sends the notice from
 its expiry sweep a few milliseconds after the interval ends.

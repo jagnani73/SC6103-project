@@ -113,7 +113,9 @@ Fixed 40-byte header:
 
 A request is identified by **(clientId, requestId)** — not by network address. That
 pair keys the reply history. The observed source endpoint is used only to address
-callbacks.
+callbacks. A `CALLBACK` names the reservation that caused it by the same pair
+(`eventClientId`, `eventRequestId`), never by the request ID alone, because every client
+counts its request IDs from 0.
 
 Two rules that are easy to violate and expensive to debug:
 

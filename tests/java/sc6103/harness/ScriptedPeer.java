@@ -154,14 +154,22 @@ public final class ScriptedPeer implements AutoCloseable {
         reply(request, status, null);
     }
 
+    /**
+     * The client every scripted callback names as the cause of its update. One fixed
+     * reserving client, so two callbacks carrying the same {@code eventRequestId} are the
+     * same request, which is what the repeated-event script relies on.
+     */
+    public static final long EVENT_CLIENT_ID = 0xA1B2C3D4L;
+
     /** Sends a CALLBACK for the given monitor registration. */
     public void callback(long clientId, int monitorRequestId, int semantics,
                          int flightId, int seats, int eventRequestId, int seq)
             throws Exception {
-        sendUnsolicited(Header.callback(clientId, monitorRequestId, semantics, 16),
+        sendUnsolicited(Header.callback(clientId, monitorRequestId, semantics, 20),
                 c -> {
                     c.putInt32(flightId);
                     c.putInt32(seats);
+                    c.putUInt32(EVENT_CLIENT_ID);
                     c.putInt32(eventRequestId);
                     c.putInt32(seq);
                 });

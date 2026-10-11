@@ -162,12 +162,13 @@ public final class ExperimentHarness {
                     final RequestReply.Outcome mutation = c.engine.call(Protocol.OP_RESERVE,
                             new Requests.Reserve(412, 1)::write);
                     final int[] callbacks = {0};
-                    final Set<Integer> events = new HashSet<>();
+                    final Set<String> events = new HashSet<>();
                     monitor.engine.setAsyncHandler(new RequestReply.AsyncHandler() {
                         @Override
                         public void onCallback(Header header, Replies.Callback body) {
                             callbacks[0]++;
-                            events.add(body.eventRequestId);
+                            // A request is the client id and the requestId together.
+                            events.add(body.eventClientId + "/" + body.eventRequestId);
                         }
 
                         @Override

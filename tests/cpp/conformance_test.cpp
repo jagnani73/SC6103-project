@@ -312,27 +312,33 @@ void test_v5_callback() {
     const Bytes expected = hex(
         "53 43 36 31 00 00 00 01 00 00 00 02 00 00 00 00"
         "00 00 00 01 0F 0E 0D 0C 00 00 00 0B FF FF FF FF"
-        "00 00 00 00 00 00 00 10 00 00 07 8E 00 00 00 75"
-        "00 00 00 16 00 00 00 01");
-    const Header callback = make_async(MSG_CALLBACK, 0x0F0E0D0CU, 11, SEM_AT_MOST_ONCE, 16);
+        "00 00 00 00 00 00 00 14 00 00 07 8E 00 00 00 75"
+        "A1 B2 C3 D4 00 00 00 16 00 00 00 01");
+    const Header callback = make_async(MSG_CALLBACK, 0x0F0E0D0CU, 11, SEM_AT_MOST_ONCE, 20);
     const Bytes actual = encode([&](Writer& out) {
         write_header(out, callback);
         out.put_i32(1934);
         out.put_i32(117);
+        out.put_u32(0xA1B2C3D4U);
         out.put_i32(22);
         out.put_i32(1);
     });
-    check(actual == expected, "V5 callback built by make_async encodes to 56 bytes");
+    check(actual == expected, "V5 callback built by make_async encodes to 60 bytes");
 
     Reader in(expected.data(), expected.size());
     Header header;
-    std::array<std::int32_t, 4> body{};
-    bool ok = read_header(in, header);
-    for (std::int32_t& field : body) ok = ok && in.get_i32(field);
+    std::int32_t flight = 0;
+    std::int32_t seats = 0;
+    std::uint32_t event_client = 0;
+    std::int32_t event_request = 0;
+    std::int32_t seq = 0;
+    const bool ok = read_header(in, header) && in.get_i32(flight) && in.get_i32(seats)
+        && in.get_u32(event_client) && in.get_i32(event_request) && in.get_i32(seq);
     check(ok && in.remaining() == 0 && same_header(header, callback)
               && length_agrees(expected, header)
-              && body == std::array<std::int32_t, 4>{{1934, 117, 22, 1}},
-          "V5 decodes with requestId 11 distinct from eventRequestId 22");
+              && flight == 1934 && seats == 117 && event_client == 0xA1B2C3D4U
+              && event_request == 22 && seq == 1,
+          "V5 decodes with the event named by client 0xA1B2C3D4 and request 22");
 }
 
 void test_v6_monitor_end() {

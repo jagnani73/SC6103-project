@@ -75,6 +75,8 @@ reproduce them only because the vector says so:
   test that crosses the two fails.
 - `requestId` `7` (V3/V4), `8` (V7), `11` (the MONITOR registration, V5/V6),
   `22` (`eventRequestId`, the reserving client's request that caused the V5 callback).
+  That reserving client is `0xA1B2C3D4`, so V5's `eventClientId` reuses the first
+  `clientId` above.
 - `semantics = 1` (at-most-once) throughout.
 
 Both `clientId`s are nonzero, as §2.3 requires.
@@ -423,9 +425,10 @@ Unsolicited, unacknowledged, never retried (§4 CALLBACK, D10). `opCode = 0` and
 header:  messageType = 2 (CALLBACK), opCode = 0, version = 1, semantics = 1
          clientId  = 0x0F0E0D0C  (the monitoring client)
          requestId = 11          (the MONITOR registration being served, §4)
-         ackUpTo = -1 (see conventions), status = 0, payloadLen = 16
+         ackUpTo = -1 (see conventions), status = 0, payloadLen = 20
 body:    flightId       = 1934
          seatsAvailable = 117
+         eventClientId  = 0xA1B2C3D4  (clientId of the client whose operation caused this update)
          eventRequestId = 22     (requestId of the operation that caused this update)
          callbackSeq    = 1      (per-registration counter, from 1)
 ```
@@ -436,7 +439,12 @@ client's RESERVE. An implementation that writes one into the other's slot produc
 datagram that decodes without error and means the wrong thing, so the two values must not
 be allowed to collide in a test.
 
-**Bytes — total 56 (0x38) = 40 header + 16 body**
+The same holds one field earlier. The header's `clientId` is the monitoring client and
+`eventClientId` is the reserving client, and they differ here for the same reason.
+`eventClientId` is a `uint32` with its top bit set, so a Java decoder that reads it as a
+signed `int` gets a negative number where this vector expects `0xA1B2C3D4`.
+
+**Bytes — total 60 (0x3C) = 40 header + 20 body**
 
 ```
 offset  bytes                                    field
@@ -449,13 +457,14 @@ offset  bytes                                    field
 0x0018  00 00 00 0B                              requestId = 11 (the MONITOR)
 0x001C  FF FF FF FF                              ackUpTo = -1 (unused)
 0x0020  00 00 00 00                              status = 0 (fixed for callbacks, §4)
-0x0024  00 00 00 10                              payloadLen = 16
+0x0024  00 00 00 14                              payloadLen = 20
                                                  --- body begins at 0x0028 = 40 ---
 0x0028  00 00 07 8E                              flightId = 1934
 0x002C  00 00 00 75                              seatsAvailable = 117
-0x0030  00 00 00 16                              eventRequestId = 22
-0x0034  00 00 00 01                              callbackSeq = 1
-                                                 total = 56 bytes
+0x0030  A1 B2 C3 D4                              eventClientId = 0xA1B2C3D4
+0x0034  00 00 00 16                              eventRequestId = 22
+0x0038  00 00 00 01                              callbackSeq = 1
+                                                 total = 60 bytes
 ```
 
 **Flat hex**
@@ -463,15 +472,15 @@ offset  bytes                                    field
 ```
 53 43 36 31 00 00 00 01 00 00 00 02 00 00 00 00
 00 00 00 01 0F 0E 0D 0C 00 00 00 0B FF FF FF FF
-00 00 00 00 00 00 00 10 00 00 07 8E 00 00 00 75
-00 00 00 16 00 00 00 01
+00 00 00 00 00 00 00 14 00 00 07 8E 00 00 00 75
+A1 B2 C3 D4 00 00 00 16 00 00 00 01
 ```
 
 **Length check**
 
-- Body: `4 × 4` = **16** = `0x10` = `payloadLen` ✓
-- Datagram: `40 + 16 = 56` ✓
-- Body offsets `0x28`, `0x2C`, `0x30`, `0x34`, ending `0x38 = 56` ✓
+- Body: `5 × 4` = **20** = `0x14` = `payloadLen` ✓
+- Datagram: `40 + 20 = 60` ✓
+- Body offsets `0x28`, `0x2C`, `0x30`, `0x34`, `0x38`, ending `0x3C = 60` ✓
 
 ---
 

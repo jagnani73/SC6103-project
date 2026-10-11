@@ -314,26 +314,31 @@ public final class TraceLog {
      * from {@link Protocol#opCodeName(int)}, so it matches the server's word for
      * the same placeholder.
      *
-     * <p>{@code eventRequestId} identifies the {@code RESERVE} that caused the
-     * update, and it belongs to <em>another</em> client. It is deliberately kept
-     * out of the {@code req} column, which means "this client's request", and put
-     * in {@code state} instead. It is worth logging because the same
-     * {@code eventRequestId} appearing under two sequence numbers is the visible
-     * signature of an at-least-once re-execution on the reserving client
-     * (docs/console-script.md sec. 5).
+     * <p>{@code eventClientId} and {@code eventRequestId} identify the
+     * {@code RESERVE} that caused the update, and they belong to <em>another</em>
+     * client. They are deliberately kept out of the {@code client} and {@code req}
+     * columns, which mean "this client" and "this client's request", and put in
+     * {@code state} instead as {@code event=req<n> by=<clientId>}. They are worth
+     * logging because the same pair appearing under two sequence numbers is the
+     * visible signature of an at-least-once re-execution on the reserving client
+     * (docs/console-script.md sec. 5). The {@code by} value is printed the way the
+     * server prints {@code client=}, so the line can be matched against the
+     * server's {@code EXECUTE} record for the same request.
      *
      * <p>Gaps in {@code callbackSeq} are not detected here. This class records
      * what arrived; the console reports the gap in prose, and
      * {@link #warn(String)} is available if the gap should also appear in the
      * trace.
      */
-    public void callback(int flightId, int callbackSeq, int seats, int eventRequestId) {
+    public void callback(int flightId, int callbackSeq, int seats, long eventClientId,
+                         int eventRequestId) {
         emit("CALLBACK", DIR_CALLBACK, NONE, Protocol.opCodeName(Protocol.OP_NONE), NONE,
                 "received",
                 "seq=" + Integer.toString(callbackSeq)
                         + " flight=" + Integer.toString(flightId)
                         + " seats=" + Integer.toString(seats)
-                        + " event=req" + Integer.toString(eventRequestId));
+                        + " event=req" + Integer.toString(eventRequestId)
+                        + " by=" + hex32(eventClientId));
     }
 
     /**

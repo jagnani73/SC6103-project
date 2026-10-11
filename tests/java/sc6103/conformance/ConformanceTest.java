@@ -78,12 +78,12 @@ public final class ConformanceTest {
           + "00 00 00 00 00 00 00 14 00 00 00 00 00 00 00 03"
           + "00 00 00 58 00 00 07 8E 00 00 08 99";
 
-    /** V5, CALLBACK, 56 bytes. */
+    /** V5, CALLBACK, 60 bytes. */
     private static final String V5_HEX =
             "53 43 36 31 00 00 00 01 00 00 00 02 00 00 00 00"
           + "00 00 00 01 0F 0E 0D 0C 00 00 00 0B FF FF FF FF"
-          + "00 00 00 00 00 00 00 10 00 00 07 8E 00 00 00 75"
-          + "00 00 00 16 00 00 00 01";
+          + "00 00 00 00 00 00 00 14 00 00 07 8E 00 00 00 75"
+          + "A1 B2 C3 D4 00 00 00 16 00 00 00 01";
 
     /** V6, MONITOR_END, 48 bytes. */
     private static final String V6_HEX =
@@ -488,22 +488,24 @@ public final class ConformanceTest {
 
     private static void v5() throws CodecException {
         final byte[] want = hex(V5_HEX);
-        checkNum("V5 vector is 56 bytes", 56, want.length);
+        checkNum("V5 vector is 60 bytes", 60, want.length);
 
         // -- Encode --
         final Header header =
-                Header.callback(CLIENT_MONITOR, 11, Protocol.SEM_AT_MOST_ONCE, 16);
+                Header.callback(CLIENT_MONITOR, 11, Protocol.SEM_AT_MOST_ONCE, 20);
         final byte[] buf = new byte[Protocol.MAX_DATAGRAM];
         final Codec out = Codec.writer(buf);
         header.write(out);
         out.putInt32(1934); // flightId
         out.putInt32(117);  // seatsAvailable
-        // requestId 11 and eventRequestId 22 are different on purpose: the first is the
-        // monitoring client's own MONITOR, the second belongs to another client's
-        // RESERVE. Swapping them decodes cleanly and means the wrong thing.
+        // The event is named by the reserving client and its requestId together. Both
+        // differ from the header's clientId and requestId on purpose: the header pair is
+        // the monitoring client's own MONITOR, the body pair is another client's RESERVE.
+        // Swapping them decodes cleanly and means the wrong thing.
+        out.putUInt32(CLIENT_QUERY); // eventClientId
         out.putInt32(22);   // eventRequestId
         out.putInt32(1);    // callbackSeq
-        checkNum("V5 encoded length", 56, out.position());
+        checkNum("V5 encoded length", 60, out.position());
         checkNum("V5 payloadLen equals datagram length minus 40",
                 header.payloadLen, out.position() - Protocol.HEADER_SIZE);
         checkNum("V5 opCode is OP_NONE", Protocol.OP_NONE, header.opCode);
@@ -520,11 +522,15 @@ public final class ConformanceTest {
         checkNum("V5 decode requestId is the MONITOR registration", 11, got.requestId);
         checkNum("V5 decode ackUpTo", Protocol.NO_ACK, got.ackUpTo);
         checkNum("V5 decode status", StatusCode.OK, got.status);
-        checkNum("V5 decode payloadLen", 16, got.payloadLen);
+        checkNum("V5 decode payloadLen", 20, got.payloadLen);
         checkObj("V5 decode header equals the built header", header, got);
         checkNum("V5 decode flightId", 1934, in.getInt32());
         checkNum("V5 decode seatsAvailable", 117, in.getInt32());
-        checkNum("V5 decode eventRequestId", 22, in.getInt32());
+        // One check for both halves, because together they are the event's identity.
+        // Java evaluates arguments left to right, so the client id is read first.
+        checkObj("V5 decode event is the reserving client's request 22",
+                Arrays.asList(CLIENT_QUERY, 22L),
+                Arrays.asList(in.getUInt32(), (long) in.getInt32()));
         checkNum("V5 decode callbackSeq", 1, in.getInt32());
         checkNum("V5 decode consumed the whole datagram", want.length, in.position());
 
@@ -532,7 +538,7 @@ public final class ConformanceTest {
         final byte[] buf2 = new byte[Protocol.MAX_DATAGRAM];
         final Codec out2 = Codec.writer(buf2);
         got.write(out2);
-        out2.putInt32(1934).putInt32(117).putInt32(22).putInt32(1);
+        out2.putInt32(1934).putInt32(117).putUInt32(CLIENT_QUERY).putInt32(22).putInt32(1);
         checkBytes("V5 round-trip re-encode", want, Arrays.copyOf(buf2, out2.position()));
     }
 

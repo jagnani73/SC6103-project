@@ -601,7 +601,7 @@ private:
         // Reply loss happens after execution. A successful reservation must still
         // notify monitors, which is the live proof that the operation ran.
         if (status == OK && request.opcode == OP_RESERVE) {
-            fire_callbacks(mutated_flight, request.request_id);
+            fire_callbacks(mutated_flight, request.client_id, request.request_id);
         }
         if (mutated_flight != 0) assert_expected_state(request, mutated_flight);
     }
@@ -806,7 +806,13 @@ private:
         return OK;
     }
 
-    void fire_callbacks(std::int32_t flight_id, std::int32_t event_request_id) {
+    // The reservation that caused the update is named by its client id and its request id
+    // together. Deck 2 slide 71 defines a unique request identifier as the requestId plus
+    // an identifier for the client process, and every client counts its requestIds from 0,
+    // so the requestId alone would make two clients' reservations look like one request
+    // executed twice (README sec. 4 CALLBACK, D10).
+    void fire_callbacks(std::int32_t flight_id, std::uint32_t event_client_id,
+                        std::int32_t event_request_id) {
         expire_monitors();
         Flight* flight = find_flight(flight_id);
         if (flight == nullptr) return;
@@ -816,10 +822,11 @@ private:
             std::array<std::uint8_t, MAX_DATAGRAM> bytes{};
             Writer out(bytes.data(), bytes.size());
             const Header header = make_async(MSG_CALLBACK, monitor.client_id,
-                                             monitor.request_id, monitor.semantics, 16);
+                                             monitor.request_id, monitor.semantics, 20);
             write_header(out, header);
             out.put_i32(flight_id);
             out.put_i32(flight->seats);
+            out.put_u32(event_client_id);
             out.put_i32(event_request_id);
             out.put_i32(monitor.callback_seq);
             if (!out.ok()) continue;

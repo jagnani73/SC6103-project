@@ -454,13 +454,20 @@ registration being served, `opCode = 0`, `status = 0`.
 |---|---|
 | `int32` | `flightId` |
 | `int32` | `seatsAvailable` |
+| `uint32` | `eventClientId` — the `clientId` of the client whose operation caused this update |
 | `int32` | `eventRequestId` — the `requestId` of the operation that caused this update |
 | `int32` | `callbackSeq` — per-registration counter from 1 |
 
 `callbackSeq` makes callback loss observable: a client seeing 1, 2, 4 reports one
-lost update. `eventRequestId` lets the client distinguish two callbacks caused by
-one duplicated operation (same value) from two distinct operations (different
-values) — the direct observable signal of at-least-once re-execution.
+lost update. `eventClientId` and `eventRequestId` together let the client distinguish
+two callbacks caused by one duplicated operation (same pair) from two distinct
+operations (different pairs) — the direct observable signal of at-least-once
+re-execution.
+
+The event is named by both fields because that pair is the request's identity (D5).
+Every client counts its `requestId`s from 0, so two clients that each reserve once send
+the same `requestId`, and a monitor comparing that field alone would report a
+re-execution that never happened.
 
 ---
 
@@ -671,8 +678,9 @@ After a successful `MONITOR` reply the client blocks until its local monotonic
 deadline, printing each callback and reporting gaps in `callbackSeq`. It accepts no
 user input during this period. It prints a summary when `MONITOR_END` arrives, or when
 the deadline plus a grace window of one retry timeout has passed, whichever comes
-first: callbacks received, callbacks missed, and any `eventRequestId` seen more than
-once. During the grace window the client listens only for `MONITOR_END`. → D20
+first: callbacks received, callbacks missed, and any `(eventClientId, eventRequestId)`
+pair seen more than once. During the grace window the client listens only for
+`MONITOR_END`. → D20
 
 ---
 
@@ -786,8 +794,8 @@ rather than live on a third machine. `RESERVE` still supplies the live demonstra
 
 Delivery is **fire and forget** — no acknowledgement, no retry, no history. That is
 *maybe* semantics in deck 3's taxonomy, and the report states so. `callbackSeq` and
-`eventRequestId` make the resulting loss and duplication measurable rather than
-merely admitted.
+the `(eventClientId, eventRequestId)` pair make the resulting loss and duplication
+measurable rather than merely admitted.
 
 The client that triggered the update also receives a callback if registered.
 
@@ -1284,20 +1292,26 @@ that file is updated in the same change.
 ### D10 — Callbacks fire-and-forget with sequence numbers
 
 **Decision.** Server-side registry, unsolicited datagrams, no acknowledgement, no
-retry. Each callback carries `callbackSeq` and `eventRequestId`. Expiry is checked
-both lazily at delivery and by a periodic sweep.
+retry. Each callback carries `callbackSeq`, `eventClientId` and `eventRequestId`.
+Expiry is checked both lazily at delivery and by a periodic sweep.
 
 **Reasoning.** The brief describes registration by address and port, delivery "every
 time a seat reservation is made by any client on the flight", and removal after the
 interval expires. Not retrying is a deliberate, disclosed choice: an unacknowledged
 push is *maybe* semantics in deck 3's taxonomy. `callbackSeq` turns that from an
-admission into a measurement. `eventRequestId` distinguishes two callbacks caused by
-one duplicated operation from two genuinely distinct operations, which is what makes
-at-least-once re-execution directly observable at the monitor rather than merely
-inferred from the seat count.
+admission into a measurement. `eventClientId` and `eventRequestId` together distinguish
+two callbacks caused by one duplicated operation from two genuinely distinct operations,
+which is what makes at-least-once re-execution directly observable at the monitor rather
+than merely inferred from the seat count. The monitor applies the rule the server uses
+to filter duplicates, which deck 2 states as "messages from the same client with same
+requestId".
 
 **Alternatives rejected.**
 
+- *Naming the event by `eventRequestId` alone.* Four bytes shorter, and wrong for the
+  reason D5 gives: two clients collide on their first request. A monitor watching two
+  reserving clients would report a re-execution that never happened, and under
+  at-most-once that contradicts the semantics on display.
 - *Reliable callbacks with acknowledgement and retry.* Technically stronger, rejected
   on scope: a second retransmission state machine running in the opposite direction,
   which the brief neither requires nor rewards, and which the single-threaded server
@@ -1692,7 +1706,7 @@ expected-value oracle gives an automatic pass/fail per trial.
 | E5 | `--drop-reply 0.5` | `ADJUST_FARE` | at-most-once | correct; duplicates answered from history |
 | E6 | `--drop-reply 0.5` | `SET_FARE` | at-least-once | **correct despite re-execution** |
 | E7 | `--drop-request 0.5` | `RESERVE` | both | correct — request loss alone does not discriminate |
-| E8 | `--drop-reply 0.5`, monitor active | `RESERVE` | at-least-once | monitor sees two callbacks with the **same `eventRequestId`** |
+| E8 | `--drop-reply 0.5`, monitor active | `RESERVE` | at-least-once | monitor sees two callbacks with the **same `(eventClientId, eventRequestId)`** |
 | E9 | 200 requests | any | at-most-once | history stays bounded with `ackUpTo`, grows without it |
 | E10 | `--drop-callback 0.5` | `MONITOR` | — | monitor reports gaps in `callbackSeq`; `MONITOR_END` gives the true total |
 
@@ -1711,8 +1725,8 @@ specifically *reply* loss, since a lost request is simply retried until it lands
 either semantics.
 
 **E8 is the strongest live demonstration**, because the duplicate execution is visible
-on a second machine as it happens, and `eventRequestId` proves the two callbacks came
-from one user action rather than two.
+on a second machine as it happens, and the repeated `(eventClientId, eventRequestId)`
+pair proves the two callbacks came from one user action rather than two.
 
 Record per trial: the mutated field's expected value, its observed value,
 retransmission count, server-side duplicate count, callbacks received versus sent, and
@@ -1982,7 +1996,8 @@ Three machines: server, client A (reserving), client B (monitoring).
    client A sends `RESERVE 2`. The server executes, drops the reply
    (`DROP ... forced-first-reply`), and executes again when client A retransmits
    (`EXECUTE ... re-executed`). Client B prints two callbacks **with the same
-   `eventRequestId`** and the line "server executed reqN twice", and the server logs
+   `eventClientId` and `eventRequestId`** (`event=reqN by=<client A's id>` on both) and
+   the line "server executed reqN twice", and the server logs
    `ORACLE_ERROR ... diverged`.
 7. Restart the server with `--semantics at-most-once --drop-first-reply 3` and both
    clients with `--semantics at-most-once`, then repeat step 6. The server answers the
