@@ -167,9 +167,9 @@ Where things stand: the specification and both implementations are complete. The
 console client is finished from the UI through the retry engine and UDP channel; the
 C++17 server implements all six operations, both invocation semantics, monitoring and
 fault injection. The automated suites currently pass 387 checks, and the E1-E10 harness,
-which drives the real Java client, passes all ten experiment groups. A report draft exists. The remaining acceptance work
-is physical: fill the report cover, prove three-machine reachability on the demo network,
-capture final evidence, and rehearse the live demonstration.
+which drives the real Java client, passes all ten experiment groups. The final report is `docs/lab-report.docx`. The
+remaining acceptance work is physical: prove three-machine reachability on the demo
+network, capture final evidence, and rehearse the live demonstration.
 
 ## Working on this repo
 
@@ -219,8 +219,8 @@ All three forks were closed on 3 September 2026. Full argument in `README.md` §
    required three-machine demo (`README.md` §20). Prove three-machine reachability
    early, not on demo day.
 
-Group membership and the work split remain open, and the report cover page requires
-both.
+Group membership and the work split are settled and recorded on the report cover page:
+four members at 25% each.
 
 Questions that *look* open but are already answered by the brief — fare type, dataset
 format, opcode numbering, CLI syntax, submission packaging — are recorded in

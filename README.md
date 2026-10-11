@@ -13,8 +13,8 @@ the live demonstration.
 
 | | |
 |---|---|
-| **Done** | Java client; C++17 server; 387 automated checks; E1-E10 experiment harness and results; report draft |
-| **Next** | fill the report cover, run the three-machine firewall/reachability rehearsal, and capture final demo evidence |
+| **Done** | Java client; C++17 server; 387 automated checks; E1-E10 experiment harness and results; lab report |
+| **Next** | run the three-machine firewall/reachability rehearsal and capture final demo evidence |
 | **Not automated** | physical multi-host demonstration and NTULearn submission |
 
 **There is one server, written in C++17, and no fallback implementation.** §22.1 records
@@ -1903,7 +1903,7 @@ not a loopback address.
 ## 16. Repository layout
 
 ```
-docs/                     course brief, console script
+docs/                     course brief, console script, lab report
 src/
   java/
     sc6103/common/        marshalling, protocol constants, header and body codecs
