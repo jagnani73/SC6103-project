@@ -8,6 +8,13 @@ console carries two interleaved streams: the **interaction** (menu, prompts, res
 and the **protocol trace** (bracketed lines). The trace uses the field order fixed in
 `README.md` §10.2, so a client log can be read alongside the server's.
 
+The trace lines in this script are shortened to the fields each example is about. On
+screen the client prints every §10.2 column, so the first `[SEND]` in §3 appears as:
+
+```
+12:01:38.373 CLIENT [SEND]        request     0xDC81C6F1 0     QUERY_BY_ROUTE    1   transmitted          -
+```
+
 Operations 5 and 6 are `ADJUST_FARE` and `SET_FARE`, settled at `README.md` §22.2.
 
 ---
@@ -80,11 +87,14 @@ destination> London
 
 3 flights, Singapore to London
 
-  ID     Departure (UTC)      Fare      Seats
-  1934   2026-10-14 09:30     899.50      117
-  2201   2026-10-15 23:05    1204.00        6
-  0088   2026-10-16 07:15     742.25        0
+  ID
+  0088
+  1934
+  2201
 ```
+
+The reply carries flight identifiers only, which is what the brief asks of this service.
+Option 2 shows the departure time, fare and seats for any of them.
 
 Empty result is an error, not an empty list:
 
@@ -216,10 +226,11 @@ duplicate at all.
 [SEND]  req=27 op=RESERVE attempt=1
 [TIMEOUT] req=27 attempt=1 after 750ms
 [RETRY] req=27 attempt=2 identical bytes
-[RECV]  req=27 status=OK decision=cache-replay
+[RECV]  req=27 status=OK decision=cache-replay?inferred
 
 Reserved 2 seats on flight 1934. 113 now available.
-Server answered from its reply history — the operation ran once.
+Answered after a retransmission. Under at-most-once the server
+replays its stored reply, so the operation ran once.
 ```
 
 The `cache-replay` line appears only under at-most-once. Surfacing it turns duplicate
@@ -230,9 +241,15 @@ Under at-least-once the same sequence ends differently, and the client should no
 pretend otherwise:
 
 ```
-[RECV]  req=27 status=OK decision=re-executed
+[RECV]  req=27 status=OK decision=re-executed?inferred
+
 Reserved 2 seats on flight 1934. 111 now available.
+Answered after a retransmission. Under at-least-once there is no
+duplicate filter, so the server may have executed this twice.
 ```
+
+Both labels end in `?inferred` because the client only knows that it sent the request
+twice. The server log is where `CACHE_HIT` or `re-executed` appears for certain.
 
 Exhaustion:
 
@@ -283,14 +300,18 @@ brief permits this, which is why the client needs no threads.
 Monitoring flight 1934 for 60s. 115 seats at registration.
 Input is blocked until the interval ends.
 
-[CALLBACK] seq=1 flight=1934 seats=113 event=req31    113 seats
-[CALLBACK] seq=2 flight=1934 seats=112 event=req32    112 seats
-[CALLBACK] seq=4 flight=1934 seats=108 event=req34    108 seats
+[CALLBACK] seq=1 flight=1934 seats=113 event=req31 by=0x0000B004
+    113 seats
+[CALLBACK] seq=2 flight=1934 seats=112 event=req32 by=0x0000B004
+    112 seats
+[CALLBACK] seq=4 flight=1934 seats=108 event=req34 by=0x0000B004
+    108 seats
            ^ gap: callback seq=3 was not delivered
-
-[MONITOR-END] flight=1934 final-seq=4
+[MONITOR_END] flight=1934 final-seq=4
 
 Monitor ended. 3 of 4 updates received, 1 lost.
+
+[MONITOR-SUMMARY] flight=1934 received=3 finalSeq=4 repeats=0 endedBy=server
 ```
 
 Three rules:
@@ -308,15 +329,21 @@ Three rules:
 ```
 Monitor ended on local timer. MONITOR_END not received;
 the lost-update count may be understated.
+3 updates received, at least 1 lost.
 ```
 
-A repeated `eventRequestId` is the visible signature of at-least-once re-execution and
-should be called out by name:
+A repeated `eventRequestId` from the same client (`by=`) is the visible signature of
+at-least-once re-execution and should be called out by name:
 
 ```
-[CALLBACK] seq=2 flight=1934 seats=111 event=req31    111 seats
+[CALLBACK] seq=2 flight=1934 seats=111 event=req31 by=0x0000B004
+    111 seats
            ^ same event as seq=1 - server executed req31 twice
 ```
+
+Two callbacks with the same `event=` and a different `by=` are requests from two clients,
+and the client prints no such line for them. Every client numbers its requests from 0, so
+the request number alone does not identify a request.
 
 ---
 
@@ -340,7 +367,7 @@ not know the server's seat count. Do not write text that implies otherwise.
 | 9 `ERR_SERVER_ERROR` | `The server reported an internal error. Check the server log.` |
 | 10 `ERR_VERSION_MISMATCH` | `Protocol version mismatch. Client and server builds differ.` |
 | 11 `ERR_SEMANTICS_MISMATCH` | `Semantics mismatch. Restart both with the same --semantics.` |
-| 12 `ERR_REQUEST_ID_CONFLICT` | `Request ID collision. This is a client bug — report it.` |
+| 12 `ERR_REQUEST_ID_CONFLICT` | `Request ID collision. This is a client bug - report it.` |
 
 Codes 1–5 are the request being refused on its merits: the system is working and the
 answer is no. Show them where the user typed. Codes 6–12 are protocol or configuration
