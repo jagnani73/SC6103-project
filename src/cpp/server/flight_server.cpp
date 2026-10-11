@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
@@ -73,6 +74,14 @@ std::string socket_error() {
     return std::to_string(WSAGetLastError());
 #else
     return std::strerror(errno);
+#endif
+}
+
+bool address_in_use() {
+#ifdef _WIN32
+    return WSAGetLastError() == WSAEADDRINUSE;
+#else
+    return errno == EADDRINUSE;
 #endif
 }
 
@@ -1037,20 +1046,30 @@ SocketHandle bind_socket(std::uint16_t port) {
     if (socket_handle == INVALID_SOCKET_HANDLE) {
         throw std::runtime_error("socket failed: " + socket_error());
     }
-    int reuse = 1;
+    // SO_REUSEADDR is deliberately not set. UDP has no TIME_WAIT, so a restarted server
+    // gains nothing from it, and on Windows it lets a second flight_server bind a port the
+    // first still holds: the bind succeeds, the old process keeps every datagram, and the
+    // new one prints a normal banner and never receives a request. README sec. 18
+    // restarts the server between steps, so a start on a busy port has to fail instead.
+    // SO_EXCLUSIVEADDRUSE also stops any other program from binding over this socket.
 #ifdef _WIN32
-    setsockopt(socket_handle, SOL_SOCKET, SO_REUSEADDR,
-               reinterpret_cast<const char*>(&reuse), sizeof(reuse));
-#else
-    setsockopt(socket_handle, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    int exclusive = 1;
+    setsockopt(socket_handle, SOL_SOCKET, static_cast<int>(SO_EXCLUSIVEADDRUSE),
+               reinterpret_cast<const char*>(&exclusive), sizeof(exclusive));
 #endif
     sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_ANY);
     address.sin_port = htons(port);
     if (bind(socket_handle, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0) {
+        // Both are read before close_socket, which may overwrite the error code.
+        const bool in_use = address_in_use();
         const std::string error = socket_error();
         close_socket(socket_handle);
+        if (in_use) {
+            throw std::runtime_error("port " + std::to_string(port) + " is already in use; "
+                                     "stop the other flight_server before starting this one");
+        }
         throw std::runtime_error("bind failed: " + error);
     }
     return socket_handle;
